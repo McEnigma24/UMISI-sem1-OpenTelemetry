@@ -1,0 +1,10 @@
+external/
+
+core_dump*
+build/
+exe/
+log/
+output/
+run_time_config/
+
+.last_arch_marker
