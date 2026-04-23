@@ -72,6 +72,9 @@ include_directories(${core_SOURCE_DIR}/_inc)
 # 2 - opentelemetry-cpp #
 # Must set BUILD_TESTING OFF *before the first* FetchContent_MakeAvailable, or OTel
 # configures tests and find_package(GTest) (often picking Windows Conda from /mnt/c).
+# OTLP/HTTP exporter needs CURL (see config: libcurl4-openssl-dev).
+# After first configure without OTLP, delete cpp/build once so this option is picked up.
+set(WITH_OTLP_HTTP ON CACHE BOOL "OTLP/HTTP span exporter" FORCE)
 include(FetchContent)
 FetchContent_Declare(
     opentelemetry-cpp
@@ -88,8 +91,11 @@ else()
 endif()
 unset(_otel_saved_BUILD_TESTING)
 
+# Trace API + SDK: ostream (stderr) and/or OTLP/HTTP (pick in code via OTEL_DEMO_TRACE_EXPORT)
 set(ALL_LIBRARIES ${ALL_LIBRARIES} opentelemetry_api)
-# set(ALL_LIBRARIES ${ALL_LIBRARIES} opentelemetry-cpp::api)
+set(ALL_LIBRARIES ${ALL_LIBRARIES} opentelemetry_trace)
+set(ALL_LIBRARIES ${ALL_LIBRARIES} opentelemetry_exporter_ostream_span)
+set(ALL_LIBRARIES ${ALL_LIBRARIES} opentelemetry_exporter_otlp_http)
 
 
 # EXAMPLE - ssd1306 #
