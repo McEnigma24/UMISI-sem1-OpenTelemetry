@@ -70,15 +70,26 @@ include_directories(${core_SOURCE_DIR}/_inc)
 
 
 # 2 - opentelemetry-cpp #
-
+# Must set BUILD_TESTING OFF *before the first* FetchContent_MakeAvailable, or OTel
+# configures tests and find_package(GTest) (often picking Windows Conda from /mnt/c).
 include(FetchContent)
 FetchContent_Declare(
-opentelemetry-cpp
-GIT_REPOSITORY https://github.com/open-telemetry/opentelemetry-cpp.git
-GIT_TAG        v1.20.0)
+    opentelemetry-cpp
+    GIT_REPOSITORY https://github.com/open-telemetry/opentelemetry-cpp.git
+    GIT_TAG        v1.20.0
+)
+set(_otel_saved_BUILD_TESTING "${BUILD_TESTING}")
+set(BUILD_TESTING OFF CACHE BOOL "Build tests" FORCE)
 FetchContent_MakeAvailable(opentelemetry-cpp)
+if(_otel_saved_BUILD_TESTING STREQUAL "")
+    unset(BUILD_TESTING CACHE)
+else()
+    set(BUILD_TESTING "${_otel_saved_BUILD_TESTING}" CACHE BOOL "Build tests" FORCE)
+endif()
+unset(_otel_saved_BUILD_TESTING)
 
-set(ALL_LIBRARIES ${ALL_LIBRARIES} opentelemetry-cpp::api)
+set(ALL_LIBRARIES ${ALL_LIBRARIES} opentelemetry_api)
+# set(ALL_LIBRARIES ${ALL_LIBRARIES} opentelemetry-cpp::api)
 
 
 # EXAMPLE - ssd1306 #

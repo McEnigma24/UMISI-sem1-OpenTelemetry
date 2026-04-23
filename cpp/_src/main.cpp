@@ -1,9 +1,6 @@
 #include "__preprocessor__.h"
 
-class test
-{
-    int tab[100];
-};
+#include <opentelemetry/trace/provider.h>
 
 #ifdef BUILD_EXECUTABLE
 int main(int argc, char* argv[])
@@ -12,17 +9,19 @@ int main(int argc, char* argv[])
     // CORE::clear_terminal(); // tests will NOT be VISIBLE with this line
     time_stamp("It just works");
 
-    CORE::str::split_string("Hello World!", ' ');
-    var(CORE::str::to_lower_case("Hello, World!"));
-
-    show_sizeof(test);
-    show_sizeof_many(test, 100);
-
-    int num = 123456789;
-    double num2 = 1234567.89123;
-
-    cout << CORE::format_number(num) << endl;
-    cout << CORE::format_number(num2) << endl;
+    // OpenTelemetry C++ API (no-op tracer without SDK) — see:
+    // https://opentelemetry-cpp.readthedocs.io/en/latest/api/GettingStarted.html
+    auto provider   = opentelemetry::trace::Provider::GetTracerProvider();
+    auto tracer     = provider->GetTracer("demo_app", "1.0.0");
+    auto outer_span = tracer->StartSpan("Outer operation");
+    auto outer_scope = tracer->WithActiveSpan(outer_span);
+    {
+        auto inner_span  = tracer->StartSpan("Inner operation");
+        auto inner_scope = tracer->WithActiveSpan(inner_span);
+        line("OpenTelemetry: nested spans created (API-only / no-op export)");
+        inner_span->End();
+    }
+    outer_span->End();
 
     return 0;
 }

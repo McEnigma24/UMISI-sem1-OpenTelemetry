@@ -13,6 +13,7 @@ PACKAGES=(
     libstdc++-11-dev
     clang
     libomp-dev
+    libbenchmark-dev
 )
 
 # echo "${BASH_SOURCE[0]}" # echo "$(dirname "${BASH_SOURCE[0]}")" # echo "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
