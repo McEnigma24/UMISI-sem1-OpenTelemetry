@@ -1,0 +1,22 @@
+# Lokalny CMake — w obrazie i tak powstaje na nowo (run.sh / start.sh)
+build/
+
+# Artefakty uruchomieniowe / logi z hosta
+exe/
+log/
+output/
+input/
+run_time_config/
+
+# Repozytorium (niepotrzebne do kompilacji w kontenerze; duże)
+.git/
+
+# IDE / narzędzia
+.vscode/
+.idea/
+*.swp
+*~
+
+# Python / inne śmieci, jeśli pojawią się w katalogu
+__pycache__/
+*.pyc

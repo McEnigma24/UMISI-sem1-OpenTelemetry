@@ -53,12 +53,29 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fopenmp")
 
 
 # 1 - core #
+# Private repo: pass a classic PAT (repo scope) at configure time, e.g.
+#   export GITHUB_TOKEN=ghp_...
+#   cmake -S . -B build
+# or: docker run -e GITHUB_TOKEN=ghp_... ...
+# Also accepts GH_TOKEN. Do not commit tokens; URL is not written to sources.
+
+set(_gh_token "$ENV{GITHUB_TOKEN}")
+if(_gh_token STREQUAL "")
+    set(_gh_token "$ENV{GH_TOKEN}")
+endif()
+if(NOT _gh_token STREQUAL "")
+    set(CORE_GIT_REPO "https://x-access-token:${_gh_token}@github.com/McEnigma24/CORE_lib.git")
+else()
+    set(CORE_GIT_REPO "https://github.com/McEnigma24/CORE_lib.git")
+endif()
+unset(_gh_token)
 
 include(FetchContent)
 FetchContent_Declare(
     core
-    GIT_REPOSITORY https://github.com/McEnigma24/CORE_lib.git
+    GIT_REPOSITORY ${CORE_GIT_REPO}
     GIT_TAG        main # lub inny tag/commit
+    GIT_SHALLOW    TRUE
 )
 FetchContent_MakeAvailable(core)
 
@@ -80,6 +97,7 @@ FetchContent_Declare(
     opentelemetry-cpp
     GIT_REPOSITORY https://github.com/open-telemetry/opentelemetry-cpp.git
     GIT_TAG        v1.20.0
+    GIT_SHALLOW    TRUE
 )
 set(_otel_saved_BUILD_TESTING "${BUILD_TESTING}")
 set(BUILD_TESTING OFF CACHE BOOL "Build tests" FORCE)
@@ -153,6 +171,7 @@ if(TEMPLATE___CTEST_ACTIVE)
         googletest
         GIT_REPOSITORY https://github.com/google/googletest.git
         GIT_TAG        v1.14.0  # możesz zmienić tag na nowszy gdy będzie dostępny
+        GIT_SHALLOW    TRUE
     )
     # For Windows: Prevent overriding the parent project's compiler/linker settings
     set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)

@@ -1,5 +1,8 @@
 #!/bin/bash
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../config"
+
 PATH_CLEANING_CORE_DUMP="$DIR_SCRIPTS/clear_core_dump.sh"
 
 function run_and_collect()

@@ -132,7 +132,7 @@ function env_prep()
 
 env_prep "$@"
 
-install_packages
+# install_packages
 
 timer_start
 {

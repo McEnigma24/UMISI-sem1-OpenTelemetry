@@ -70,9 +70,7 @@ void init_tracer_export_to_cerr()
 
     // można użyć BatchSpanProcessor //
 
-    const auto resource =
-        opentelemetry::sdk::resource::Resource::Create({{"service.name", "demo_app"},
-                                                        {"service.version", "1.0.0"}});
+    const auto resource = opentelemetry::sdk::resource::Resource::Create({{"service.name", "demo_app"}, {"service.version", "1.0.0"}});
     auto up = trace_sdk::TracerProviderFactory::Create(std::move(processor), resource);
     g_sdk_tracer_provider = std::shared_ptr<trace_sdk::TracerProvider>(std::move(up));
     std::shared_ptr<trace_api::TracerProvider> api = g_sdk_tracer_provider;
@@ -225,8 +223,7 @@ int main(int argc, char* argv[])
     const bool otlp = true;
     if (otlp)
     {
-        line("OTEL_DEMO_TRACE_EXPORT=otlp: eksport HTTP (nc: ./scripts/listen_otlp_http.sh ; endpoint: "
-             "OTEL_EXPORTER_OTLP_*)");
+        line("OTEL_DEMO_TRACE_EXPORT=otlp: eksport HTTP (nc: ./scripts/listen_otlp_http.sh ; endpoint: OTEL_EXPORTER_OTLP_*)");
         init_tracer_otlp_http();
     }
     else

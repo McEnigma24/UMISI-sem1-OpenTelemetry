@@ -1,0 +1,41 @@
+# remove all #
+docker rmi -f $(docker images -aq)
+
+# remove dangling images # <none> <none>
+docker image prune
+
+# Usuwanie obrazu #
+docker rmi -f
+
+
+
+
+
+# docker-buildx
+# docker buildx create --use
+
+
+# docker-compose
+# docker
+
+
+# ls #
+docker images
+
+# build #
+docker build -t "cpp" .
+# docker buildx build --progress=plain -t cpp . --load
+
+# run #
+docker run cpp
+
+
+
+
+
+
+# uruchomienie kontenera w trybie interaktywnym #
+# docker run -it cpp
+
+# wejście do kontenera #
+# docker run -it --rm cpp bash
