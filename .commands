@@ -29,9 +29,23 @@ docker build -t "cpp" .
 # run #
 docker run cpp
 
+# --rm -it     # rm      interactive
 
+# docker run -v cpp-build:/app/build cpp   # wolumen zapsujący app/build
+# docker run -v "$(pwd)/build:/app/build" cpp
 
+# Sam build (bez OTLP do hosta): 127.0.0.1 w kontenerze ≠ host z netcat.
+# docker run --rm -it -v "$(pwd)/build-docker:/app/build" cpp
 
+# OTLP do netcat na hoście (Terminal A: ./listen_otlp_http.sh z cpp/).
+# Linux/WSL: --add-host=host.docker.internal:host-gateway
+# Docker Desktop: często host.docker.internal już jest — możesz pominąć --add-host.
+docker run --rm -it \
+  --add-host=host.docker.internal:host-gateway \
+  -e OTEL_DEMO_TRACE_EXPORT=otlp \
+  -e OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://host.docker.internal:4318/v1/traces \
+  -v "$(pwd)/build-docker:/app/build" \
+  cpp
 
 
 # uruchomienie kontenera w trybie interaktywnym #
