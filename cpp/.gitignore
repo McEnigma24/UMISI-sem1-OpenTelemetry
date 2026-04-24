@@ -13,5 +13,4 @@ run_time_config/
 
 
 *.tar
-
-# zipped is included in the repo
+*.tar.zip
