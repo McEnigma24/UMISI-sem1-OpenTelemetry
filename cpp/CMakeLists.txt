@@ -53,55 +53,47 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fopenmp")
 
 
 # 1 - core #
-# Private repo: pass a classic PAT (repo scope) at configure time, e.g.
-#   export GITHUB_TOKEN=ghp_...
-#   cmake -S . -B build
-# or: docker run -e GITHUB_TOKEN=ghp_... ...
-# Also accepts GH_TOKEN. Do not commit tokens; URL is not written to sources.
+# include(FetchContent)
+# FetchContent_Declare(
+#     core
+#     GIT_REPOSITORY ${CORE_GIT_REPO}
+#     GIT_TAG        main # lub inny tag/commit
+#     GIT_SHALLOW    TRUE
+# )
+# FetchContent_MakeAvailable(core)
 
-set(_gh_token "$ENV{GITHUB_TOKEN}")
-if(_gh_token STREQUAL "")
-    set(_gh_token "$ENV{GH_TOKEN}")
-endif()
-if(NOT _gh_token STREQUAL "")
-    set(CORE_GIT_REPO "https://x-access-token:${_gh_token}@github.com/McEnigma24/CORE_lib.git")
-else()
-    set(CORE_GIT_REPO "https://github.com/McEnigma24/CORE_lib.git")
-endif()
-unset(_gh_token)
+# set(ALL_LIBRARIES ${ALL_LIBRARIES} core)
+# include_directories(${core_SOURCE_DIR}/_inc)
 
-include(FetchContent)
-FetchContent_Declare(
-    core
-    GIT_REPOSITORY ${CORE_GIT_REPO}
-    GIT_TAG        main # lub inny tag/commit
-    GIT_SHALLOW    TRUE
-)
-FetchContent_MakeAvailable(core)
-
+add_subdirectory(external/core)
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/external/core/_inc)
 set(ALL_LIBRARIES ${ALL_LIBRARIES} core)
-include_directories(${core_SOURCE_DIR}/_inc)
-
-
 
 
 
 # 2 - opentelemetry-cpp #
-# Must set BUILD_TESTING OFF *before the first* FetchContent_MakeAvailable, or OTel
-# configures tests and find_package(GTest) (often picking Windows Conda from /mnt/c).
-# OTLP/HTTP exporter needs CURL (see config: libcurl4-openssl-dev).
-# After first configure without OTLP, delete cpp/build once so this option is picked up.
 set(WITH_OTLP_HTTP ON CACHE BOOL "OTLP/HTTP span exporter" FORCE)
-include(FetchContent)
-FetchContent_Declare(
-    opentelemetry-cpp
-    GIT_REPOSITORY https://github.com/open-telemetry/opentelemetry-cpp.git
-    GIT_TAG        v1.20.0
-    GIT_SHALLOW    TRUE
-)
+set(WITH_BENCHMARK OFF CACHE BOOL "OpenTelemetry: benchmark executables" FORCE)
 set(_otel_saved_BUILD_TESTING "${BUILD_TESTING}")
 set(BUILD_TESTING OFF CACHE BOOL "Build tests" FORCE)
-FetchContent_MakeAvailable(opentelemetry-cpp)
+
+# include(FetchContent)
+# FetchContent_Declare(
+#     opentelemetry-cpp
+#     GIT_REPOSITORY https://github.com/open-telemetry/opentelemetry-cpp.git
+#     GIT_TAG        v1.20.0
+#     GIT_SHALLOW    TRUE
+#     UPDATE_DISCONNECTED ON
+# )
+
+# FetchContent_MakeAvailable(opentelemetry-cpp)
+add_subdirectory(external/opentelemetry-cpp)
+
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL "12")
+    if(TARGET opentelemetry_metrics)
+        target_compile_options(opentelemetry_metrics PRIVATE -Wno-maybe-uninitialized)
+    endif()
+endif()
 if(_otel_saved_BUILD_TESTING STREQUAL "")
     unset(BUILD_TESTING CACHE)
 else()

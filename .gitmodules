@@ -1,0 +1,6 @@
+[submodule "cpp/external/core"]
+	path = cpp/external/core
+	url = https://github.com/McEnigma24/CORE_lib.git
+[submodule "cpp/external/opentelemetry-cpp"]
+	path = cpp/external/opentelemetry-cpp
+	url = https://github.com/open-telemetry/opentelemetry-cpp.git
