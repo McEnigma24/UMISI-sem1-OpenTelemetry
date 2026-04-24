@@ -24,10 +24,10 @@ string(LENGTH "${CMAKE_SOURCE_DIR}/" SOURCE_PATH_SIZE)
 add_definitions(-DSOURCE_PATH_SIZE=${SOURCE_PATH_SIZE})
 
 # Change names of:
-# TEMPLATE___CTEST_ACTIVE
-# TEMPLATE___BUILD_LIBRARY
+# OpenTelemetry___CTEST_ACTIVE
+# OpenTelemetry___BUILD_LIBRARY
 
-set(CONST_TARGET_NAME "TEMPLATE")
+set(CONST_TARGET_NAME "OpenTelemetry")
 
 # COMPILER FLAGS #
 
@@ -131,9 +131,9 @@ set(ALL_LIBRARIES ${ALL_LIBRARIES} opentelemetry_exporter_otlp_http)
 
 
 
-option(TEMPLATE___BUILD_LIBRARY "Build library instead of executable" OFF) # default value - could be overwritten by provided FLAG
+option(OpenTelemetry___BUILD_LIBRARY "Build library instead of executable" OFF) # default value - could be overwritten by provided FLAG
 
-if(TEMPLATE___BUILD_LIBRARY)
+if(OpenTelemetry___BUILD_LIBRARY)
     message(WARNING "Building library")
 
     set(TARGET_NAME "${CONST_TARGET_NAME}")
@@ -151,9 +151,9 @@ else()
     target_link_libraries(${TARGET_NAME} PUBLIC ${ALL_LIBRARIES})
 endif()
 
-option(TEMPLATE___CTEST_ACTIVE "Testing is active" OFF)  # default value - could be overwritten by provided FLAG
+option(OpenTelemetry___CTEST_ACTIVE "Testing is active" OFF)  # default value - could be overwritten by provided FLAG
 
-if(TEMPLATE___CTEST_ACTIVE)
+if(OpenTelemetry___CTEST_ACTIVE)
     message(WARNING "TESTING...")
     # Włączenie testów
     enable_testing()

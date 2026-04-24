@@ -1,2 +1,0 @@
-# Hashes of file build rules.
-2e32027a864983e97c2635b9fadb6b8a generated/third_party/opentelemetry-proto/opentelemetry/proto/common/v1/common.pb.h

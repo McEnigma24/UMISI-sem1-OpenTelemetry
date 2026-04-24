@@ -12,6 +12,7 @@ run_time_config/
 .git/
 
 # IDE / narzędzia
+.cursor/
 .vscode/
 .idea/
 *.swp

@@ -2,13 +2,15 @@
 docker rmi -f $(docker images -aq)
 
 # remove dangling images # <none> <none>
-docker image prune
+docker image prune -f
 
 # Usuwanie obrazu #
 docker rmi -f
 
 
+docker save -o moj_obraz.tar nazwa_obrazu:tag
 
+docker load -i moj_obraz.tar
 
 
 # docker-buildx

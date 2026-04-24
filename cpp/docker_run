@@ -1,3 +1,5 @@
+. docker_build
+
 docker run --rm -it \
   --add-host=host.docker.internal:host-gateway \
   -e OTEL_DEMO_TRACE_EXPORT=otlp \
