@@ -61,6 +61,5 @@ docker run --rm -it \
 
 # Image pull #
 
-docker pull python:3.11-slim
 docker pull python:3.10-slim
 docker pull otel/opentelemetry-collector-contrib:latest

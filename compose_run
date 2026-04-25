@@ -1,3 +1,11 @@
-. docker_compose_build
+. compose_build
 
 docker compose up
+
+docker container prune -f
+
+
+
+
+
+# docker compose run --rm
