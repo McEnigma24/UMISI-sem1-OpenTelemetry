@@ -1,0 +1,6 @@
+slicer/in
+slicer/out
+
+*.tar
+*.tar.zip
+

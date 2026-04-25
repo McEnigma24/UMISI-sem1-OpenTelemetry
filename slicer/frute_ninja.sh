@@ -2,7 +2,7 @@
 # Recursively split every regular file under ./in into ./out, mirroring subdirs.
 # Chunks: <relpath/to/file>.<digits> — digit count is minimal for the part count (split -a).
 # Skips files whose basename looks like a chunk (trailing .digits).
-# Chunk size is fixed at 99M (same as: split -b 99M, i.e. 99 * 1024^2 bytes).
+# Chunk size is fixed at 100M (same as: split -b 100M, i.e. 100 * 1024^2 bytes).
 # If ./out is not empty, lists it and asks before clearing; then only output from this run.
 
 set -euo pipefail
@@ -10,8 +10,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 IN="${SCRIPT_DIR}/in"
 OUT="${SCRIPT_DIR}/out"
-# Match GNU split -b 99M (binary megabytes)
-CHUNK_BYTES=$((99 * 1024 * 1024))
+# Match GNU split -b 100M (binary megabytes)
+CHUNK_BYTES=$((100 * 1024 * 1024))
 
 mkdir -p "$OUT"
 
@@ -82,12 +82,12 @@ while IFS= read -r -d '' path; do
     max_ids=$((max_ids * 10))
   done
 
-  echo "Split: $rel — $parts part(s), using $suffix_digits suffix digit(s) (99M each)"
+  echo "Split: $rel — $parts part(s), using $suffix_digits suffix digit(s) (100M each)"
   if [[ "$size" -eq 0 ]]; then
     # GNU split writes no outputs for empty input; one zero-byte chunk matches 1 part / 1 digit.
     : >"$out_dir/${base}.$(printf '%0*d' "$suffix_digits" 0)"
   else
-    split -b 99M -d -a "$suffix_digits" "$path" "$out_dir/${base}."
+    split -b 100M -d -a "$suffix_digits" "$path" "$out_dir/${base}."
   fi
   split_count=$((split_count + 1))
 done < <(find "$IN" -type f -print0 2>/dev/null)
