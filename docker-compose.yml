@@ -22,28 +22,35 @@ services:
     environment:
       OTEL_DEMO_TRACE_EXPORT: otlp
       OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://otel:4318/v1/traces
-    command:
-      - /bin/sh
-      - -c
-      - "sleep 2 && exec ./start.sh"
     depends_on:
       otel:
         condition: service_started
 
-  # client-python:
-  #   build:
-  #     context: ./clients/python
-  #   image: client_python
-  #   environment:
-  #     OTEL_DEMO_TRACE_EXPORT: otlp
-  #     OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://otel:4318/v1/traces
-  #   command:
-  #     - /bin/sh
-  #     - -c
-  #     - "sleep 2 && exec python _src/main.py"
-  #   depends_on:
-  #     otel:
-  #       condition: service_started
+  client-python:
+    build:
+      context: ./clients/python
+    image: client_python
+    environment:
+      OTEL_DEMO_TRACE_EXPORT: otlp
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://otel:4318/v1/traces
+    depends_on:
+      otel:
+        condition: service_started
+
+  client-csharp:
+    build:
+      context: ./clients/csharp
+    image: client_csharp
+    environment:
+      OTEL_DEMO_TRACE_EXPORT: otlp
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://otel:4318/v1/traces
+    depends_on:
+      otel:
+        condition: service_started
+
+
+
+
 
   # client-cpp:
   #   build:
@@ -74,3 +81,9 @@ services:
 
 # umisi-sem1-opentelemetry - otel          - 1
 # umisi-sem1-opentelemetry - client-python - 1
+
+
+  #   command:
+  #     - /bin/sh
+  #     - -c
+  #     - "sleep 2 && exec python _src/main.py"

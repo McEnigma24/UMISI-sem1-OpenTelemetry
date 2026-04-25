@@ -25,4 +25,6 @@ COPY . .
 
 RUN chmod +x ./Docker_start.sh
 
-CMD ["./Docker_start.sh"]
+# CMD ["./Docker_start.sh"]
+
+CMD ["/bin/sh", "-c", "sleep 2 && exec ./Docker_start.sh"]
