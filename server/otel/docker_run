@@ -1,0 +1,7 @@
+. docker_build
+
+# Oficjalny OpenTelemetry Collector (contrib): OTLP gRPC:4317, HTTP:4318; trace’y w `docker logs`.
+docker run --rm -it \
+  -p 4317:4317 \
+  -p 4318:4318 \
+  server_otel

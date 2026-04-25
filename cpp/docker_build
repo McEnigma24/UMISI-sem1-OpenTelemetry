@@ -1,3 +1,0 @@
-docker build -t "cpp" .
-
-docker image prune -f

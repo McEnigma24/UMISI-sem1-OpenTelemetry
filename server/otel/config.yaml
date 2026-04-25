@@ -1,0 +1,32 @@
+# OpenTelemetry Collector (contrib) — odbiór OTLP, podgląd w logach (debug exporter).
+# Porty: 4317 gRPC, 4318 HTTP (jak w spec). Klienci: np. http://host:4318/v1/traces
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch: {}
+
+exporters:
+  debug:
+    verbosity: detailed
+    # stdout — w `docker logs`; do produkcji: otlp/jaeger/prometheus itd.
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [debug]
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [debug]
+    logs:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [debug]

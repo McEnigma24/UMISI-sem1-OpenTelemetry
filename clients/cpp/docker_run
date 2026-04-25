@@ -5,4 +5,4 @@ docker run --rm -it \
   -e OTEL_DEMO_TRACE_EXPORT=otlp \
   -e OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://host.docker.internal:4318/v1/traces \
   -v "$(pwd)/build-docker:/app/build" \
-  cpp
+  client_cpp

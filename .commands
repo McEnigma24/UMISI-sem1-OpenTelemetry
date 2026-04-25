@@ -55,3 +55,12 @@ docker run --rm -it \
 
 # wejście do kontenera #
 # docker run -it --rm cpp bash
+
+
+
+
+# Image pull #
+
+docker pull python:3.11-slim
+docker pull python:3.10-slim
+docker pull otel/opentelemetry-collector-contrib:latest
