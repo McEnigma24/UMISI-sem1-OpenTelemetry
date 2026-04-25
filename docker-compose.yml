@@ -11,8 +11,7 @@ services:
   otel:
     build:
       context: ./server/otel
-    # Ten sam tag, co w server/otel: docker build -t server_otel
-    image: 0-project_otel-server_otel
+    image: composed-project_otel-server_otel
     ports:
       - "4317:4317"
       - "4318:4318"
@@ -22,8 +21,8 @@ services:
   client-python:
     build:
       context: ./clients/python
-    # Ten sam tag, co w clients/python: docker build -t client_python
-    image: 0-project_otel-client_python
+    image: composed-project_otel-client_python
+
     # Ten sam `main.py` co w clients/python — OTLP/HTTP, nie trzeba host.docker.internal
     environment:
       OTEL_DEMO_TRACE_EXPORT: otlp
@@ -41,5 +40,11 @@ services:
 
 
 
+# Container umisi-sem1-opentelemetry-otel-1
+# Container umisi-sem1-opentelemetry-client-python-1
+
 # Container names #
-# {nazwa_projektu}_{nazwa_usługi}_{numer_repliki}
+# {nazwa_projektu}-{nazwa_usługi}-{numer_repliki}
+
+# umisi-sem1-opentelemetry - otel          - 1
+# umisi-sem1-opentelemetry - client-python - 1
