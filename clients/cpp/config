@@ -17,6 +17,8 @@ PACKAGES=(
     libcurl4-openssl-dev
     libprotobuf-dev
     protobuf-compiler
+    docker-compose-v2
+    docker
 )
 
 # echo "${BASH_SOURCE[0]}" # echo "$(dirname "${BASH_SOURCE[0]}")" # echo "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

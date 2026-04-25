@@ -1,0 +1,45 @@
+# Wrapper nad Twoimi Dockerfilami: każde `build.context` = katalog z Dockerfile
+# (np. server/otel/Dockerfile, clients/python/Dockerfile). Compose tylko robi
+# odpowiednik `docker build` + `docker run` w jednej sieci: nazwa usługi = hostname.
+#
+#   docker compose up --build
+#   docker compose logs -f otel          # trace’y z `debug` exp.
+#   docker compose up --scale client-python=2
+#   docker compose up otel               # sam Collector, klient ręcznie z hosta
+#
+services:
+  otel:
+    build:
+      context: ./server/otel
+    # Ten sam tag, co w server/otel: docker build -t server_otel
+    image: 0-project_otel-server_otel
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+    # Collector końcowy — zostawiamy, żeby w logach widać było trace’y z `debug` exp.
+    # restart: unless-stopped
+
+  client-python:
+    build:
+      context: ./clients/python
+    # Ten sam tag, co w clients/python: docker build -t client_python
+    image: 0-project_otel-client_python
+    # Ten sam `main.py` co w clients/python — OTLP/HTTP, nie trzeba host.docker.internal
+    environment:
+      OTEL_DEMO_TRACE_EXPORT: otlp
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://otel:4318/v1/traces
+    # Krótka pauza, żeby 4318 na collectorze był w stanie przyjąć
+    command:
+      - /bin/sh
+      - -c
+      - "sleep 2 && exec python _src/main.py"
+    depends_on:
+      otel:
+        condition: service_started
+
+
+
+
+
+# Container names #
+# {nazwa_projektu}_{nazwa_usługi}_{numer_repliki}
