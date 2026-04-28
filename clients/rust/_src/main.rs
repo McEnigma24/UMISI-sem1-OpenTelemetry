@@ -43,8 +43,9 @@ struct St {
     path: String,
 }
 
-fn line(s: &str) {
-    println!("{s}");
+fn rs_line(s: &str) {
+    let ts = chrono::Local::now().format("%H:%M:%S%.3f");
+    println!("{ts} {s}");
 }
 
 fn use_otlp() -> bool {
@@ -132,6 +133,11 @@ async fn pipeline(
             return (StatusCode::BAD_REQUEST, e.to_string()).into_response();
         }
     };
+    rs_line(&format!(
+        "[{}] received: {}",
+        st.id,
+        String::from_utf8_lossy(&body)
+    ));
     bump(&mut m, &st.id);
 
     if let Some(ref u) = st.next {
@@ -141,6 +147,11 @@ async fn pipeline(
                 return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
             }
         };
+        rs_line(&format!(
+            "[{}] forward to {u}: {}",
+            st.id,
+            String::from_utf8_lossy(&ser)
+        ));
         let hop = t.start_with_context("pipeline.hop", &parent);
         let hop_cx = parent.clone().with_span(hop);
         let forward = t.start_with_context("pipeline.forward", &hop_cx);
@@ -188,6 +199,10 @@ async fn pipeline(
             return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
         }
     };
+    rs_line(&format!(
+        "[{}] respond (terminal, brak forward): {out}",
+        st.id
+    ));
     Response::builder()
         .status(StatusCode::OK)
         .header("content-type", "application/json")
@@ -201,7 +216,7 @@ async fn main() {
         .unwrap_or_else(|_| "pipeline".to_string())
         .eq_ignore_ascii_case("exercises")
     {
-        line("DEMO_MODE=exercises — użyj DEMO_MODE=pipeline.");
+        rs_line("DEMO_MODE=exercises — użyj DEMO_MODE=pipeline.");
         return;
     }
     let prov = init_otel();
@@ -227,7 +242,7 @@ async fn main() {
         .route(st.path.as_str(), post(pipeline))
         .with_state(st.clone());
     let l = TcpListener::bind(a).await.expect("bind");
-    line(&format!("Rust pipeline http://{a}{} next={:?}", st.path, st.next));
+    rs_line(&format!("Rust pipeline http://{a}{} next={:?}", st.path, st.next));
     axum::serve(l, app)
         .await
         .expect("serve");

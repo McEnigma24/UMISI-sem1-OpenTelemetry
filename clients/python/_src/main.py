@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import socket
+from datetime import datetime
 import sys
 import time
 import uuid
@@ -43,8 +44,10 @@ _TRACER: trace.Tracer | None = None
 _METER: metrics.Meter | None = None
 
 
-def _line(msg: str) -> None:
-    print(msg, flush=True)
+def py_line(msg: str) -> None:
+    now = datetime.now()
+    ts = now.strftime("%H:%M:%S.%f")[:-3]
+    print(f"{ts} {msg}", flush=True)
 
 
 def _build_resource() -> Resource:
@@ -179,6 +182,10 @@ def _make_handler(
                 self.send_error(400, "JSON must be an object")
                 return
 
+            py_line(
+                f"[{client_id}] received: {json.dumps(data, ensure_ascii=False)}"
+            )
+
             carrier = _lower_headers(self.headers)
             parent_ctx = extract(carrier)
             token = otel_context.attach(parent_ctx)
@@ -192,6 +199,16 @@ def _make_handler(
                 ) as span:
                     out = _process_payload(data, client_id)
                     body_out = json.dumps(out).encode("utf-8")
+                    if next_url and next_url.strip():
+                        py_line(
+                            f"[{client_id}] forward to {next_url.strip()}: "
+                            f"{json.dumps(out, ensure_ascii=False)}"
+                        )
+                    else:
+                        py_line(
+                            f"[{client_id}] respond (terminal): "
+                            f"{json.dumps(out, ensure_ascii=False)}"
+                        )
                     span.set_attribute("demo.counter", out["counter"])
                     span.set_attribute("demo.table_len", len(out["table_of_clients"]))
                     if next_url and next_url.strip():
@@ -236,14 +253,14 @@ def run_server() -> None:
     client_id = os.environ.get("DEMO_CLIENT_ID", "py").strip() or "py"
     next_url = os.environ.get("DEMO_NEXT_URL", "").strip() or None
     if not next_url:
-        _line("DEMO_NEXT_URL pusty: węzeł terminalny (odpowiedź = przetworzony JSON, brak forward).")
+        py_line("DEMO_NEXT_URL pusty: węzeł terminalny (odpowiedź = przetworzony JSON, brak forward).")
 
     provider = _init_telemetry()
     if _TRACER is None:
         raise SystemExit(1)
     hcls = _make_handler(path, client_id, next_url)
     httpd = ThreadingHTTPServer((host if host else "0.0.0.0", port), hcls)
-    _line(f"pipeline: listen http://{addr}{path} client_id={client_id!r} next={next_url!r}")
+    py_line(f"pipeline: listen http://{addr}{path} client_id={client_id!r} next={next_url!r}")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
@@ -262,11 +279,11 @@ def main() -> int:
 
 
 def _main_legacy() -> int:
-    _line("DEMO_MODE=exercises: legacy demo (skrót). Pełne ćwiczenia OpenTelemetry: historia gita / wcześniejsza wersja pliku.")
+    py_line("DEMO_MODE=exercises: legacy demo (skrót). Pełne ćwiczenia OpenTelemetry: historia gita / wcześniejsza wersja pliku.")
     p = _init_telemetry()
     t = trace.get_tracer("demo_app", "1.0.0")
     with t.start_as_current_span("legacy_demo_outlined"):
-        _line("OpenTelemetry: legacy run (użyj DEMO_MODE=pipeline dla łańcucha HTTP).")
+        py_line("OpenTelemetry: legacy run (użyj DEMO_MODE=pipeline dla łańcucha HTTP).")
     pr = trace.get_tracer_provider()
     if hasattr(pr, "force_flush"):
         pr.force_flush(timeout_millis=10_000)  # type: ignore[union-attr]

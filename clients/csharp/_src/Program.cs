@@ -1,12 +1,14 @@
 /*
  * HTTP pipeline (C# — węzeł terminalny). POST DEMO_HTTP_PATH, JSON.
  */
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Diagnostics.Metrics;
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using Microsoft.Extensions.Logging;
 using OpenTelemetry;
 using OpenTelemetry.Exporter;
 using OpenTelemetry.Metrics;
@@ -18,7 +20,7 @@ namespace OtelDemo;
 public static class Program
 {
     private static readonly ActivitySource Act = new("demo_app", "1.0.0");
-    private static void Line(string m) => Console.WriteLine(m);
+    private static void CsLine(string m) => Console.WriteLine($"{DateTime.Now:HH:mm:ss.fff} {m}");
     private static string GetLo(string k, string d) => Environment.GetEnvironmentVariable(k) ?? d;
 
     private static string HostN() =>
@@ -61,11 +63,13 @@ public static class Program
     {
         if (GetLo("DEMO_MODE", "pipeline").Equals("exercises", StringComparison.OrdinalIgnoreCase))
         {
-            Line("DEMO_MODE=exercises: legacy off — użyj DEMO_MODE=pipeline.");
+            CsLine("DEMO_MODE=exercises: legacy off — użyj DEMO_MODE=pipeline.");
             return;
         }
 
         var builder = WebApplication.CreateBuilder();
+        // Domyślne ASP.NET Core loguje każde żądanie (Request starting, endpoint, …) — dla demo tylko ostrzeżenia i wyżej.
+        builder.Logging.AddFilter("Microsoft.AspNetCore", LogLevel.Warning);
         var l = GetLo("DEMO_HTTP_ADDR", "0.0.0.0:8080");
         if (!l.StartsWith("http", StringComparison.OrdinalIgnoreCase))
         {
@@ -118,7 +122,7 @@ public static class Program
         var hopDuration = m.CreateHistogram<double>("demo.pipeline.hop.duration_ms", description: "hop time ms", unit: "ms");
 
         app.Lifetime.ApplicationStarted.Register(
-            () => Line($"C# pipeline {l}{path} client_id={cid} (terminal)"));
+            () => CsLine($"C# pipeline {l}{path} client_id={cid} (terminal)"));
 
         app.MapPost(
             path,
@@ -165,6 +169,8 @@ public static class Program
                         }
                     }
 
+                    CsLine($"[{cid}] received: {(string.IsNullOrEmpty(text) ? "{}" : text)}");
+
                     c0++;
                     list.Add(cid);
                     var outJ = new
@@ -172,6 +178,8 @@ public static class Program
                         counter = c0.ToString(),
                         table_of_clients = list,
                     };
+
+                    CsLine($"[{cid}] respond (terminal, brak forward): {JsonSerializer.Serialize(outJ)}");
 
                     hopDuration.Record(Stopwatch.GetElapsedTime(t0).TotalMilliseconds);
                     msgCount.Add(1);

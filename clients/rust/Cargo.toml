@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 axum = { version = "0.7", default-features = false, features = ["http1", "json", "tokio"] }
 http = "1"
 opentelemetry = { version = "0.31", features = ["trace"] }
