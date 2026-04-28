@@ -7,6 +7,9 @@
 #
 # UI: Jaeger http://localhost:16686  |  Prometheus http://localhost:9090  |  Grafana http://localhost:3000 (admin/admin)
 #
+# HTTP pipeline: py → rust → cs (DEMO_NEXT_URL, port 8080 w sieci). Dla `scale: 1` na węzłach.
+# Stub sender (jednorazowo): `docker compose run --rm sender`
+#
 services:
   jaeger:
     image: jaegertracing/all-in-one:latest
@@ -61,9 +64,16 @@ services:
     environment:
       OTEL_DEMO_TRACE_EXPORT: otlp
       OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://otel:4318/v1/traces
+      OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: http://otel:4318/v1/metrics
       OTEL_ENVIRONMENT: local
       OTEL_DEMO_RESOURCE_TAG: lang-rust
+      DEMO_HTTP_ADDR: 0.0.0.0:8080
+      DEMO_HTTP_PATH: /v1/pipeline
+      DEMO_CLIENT_ID: rs
+      DEMO_NEXT_URL: http://client-csharp:8080/v1/pipeline
     depends_on:
+      client-csharp:
+        condition: service_started
       otel:
         condition: service_started
 
@@ -71,14 +81,35 @@ services:
     build:
       context: ./clients/python
     image: client_python
+    ports:
+      - "18080:8080"
     environment:
       OTEL_DEMO_TRACE_EXPORT: otlp
       OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://otel:4318/v1/traces
+      OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: http://otel:4318/v1/metrics
       OTEL_ENVIRONMENT: local
       OTEL_DEMO_RESOURCE_TAG: lang-python
+      DEMO_HTTP_ADDR: 0.0.0.0:8080
+      DEMO_HTTP_PATH: /v1/pipeline
+      DEMO_CLIENT_ID: py
+      DEMO_NEXT_URL: http://client-rust:8080/v1/pipeline
     depends_on:
+      client-rust:
+        condition: service_started
       otel:
         condition: service_started
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import socket; s=socket.create_connection(('127.0.0.1',8080),2); s.close()",
+        ]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 60s
 
   client-csharp:
     build:
@@ -87,11 +118,26 @@ services:
     environment:
       OTEL_DEMO_TRACE_EXPORT: otlp
       OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://otel:4318/v1/traces
+      OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: http://otel:4318/v1/metrics
       OTEL_ENVIRONMENT: local
       OTEL_DEMO_RESOURCE_TAG: lang-csharp
+      DEMO_HTTP_ADDR: 0.0.0.0:8080
+      DEMO_HTTP_PATH: /v1/pipeline
+      DEMO_CLIENT_ID: cs
+      DEMO_NEXT_URL: ""
     depends_on:
       otel:
         condition: service_started
+
+  sender:
+    build:
+      context: ./stub/sender/python_send_starting_msg
+    image: demo_sender
+    environment:
+      DEMO_TARGET_URL: http://client-python:8080/v1/pipeline
+    depends_on:
+      client-python:
+        condition: service_healthy
 
 
 

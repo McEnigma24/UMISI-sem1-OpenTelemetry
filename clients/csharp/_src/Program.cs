@@ -1,244 +1,184 @@
 /*
- * Prosty klient OpenTelemetry (OTLP/HTTP protobuf albo console) — analog
- * clients/python/_src/main.py / clients/rust/_src/main.rs.
- * Endpoint: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT (domyślnie http://127.0.0.1:4318/v1/traces).
- * Tryb: OTEL_DEMO_TRACE_EXPORT — puste / otlp / http → OTLP; ostream → console; inne (jak Python) → console.
- *
- * Resource: OTEL_SERVICE_INSTANCE_ID, OTEL_ENVIRONMENT / DEPLOYMENT_ENVIRONMENT, OTEL_DEMO_RESOURCE_TAG.
+ * HTTP pipeline (C# — węzeł terminalny). POST DEMO_HTTP_PATH, JSON.
  */
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Diagnostics.Metrics;
 using System.Net;
+using System.Text;
+using System.Text.Json;
 using OpenTelemetry;
 using OpenTelemetry.Exporter;
+using OpenTelemetry.Metrics;
 using OpenTelemetry.Resources;
 using OpenTelemetry.Trace;
 
 namespace OtelDemo;
 
-internal static class Program
+public static class Program
 {
-    private static void Line(string msg) => Console.WriteLine(msg);
+    private static readonly ActivitySource Act = new("demo_app", "1.0.0");
+    private static void Line(string m) => Console.WriteLine(m);
+    private static string GetLo(string k, string d) => Environment.GetEnvironmentVariable(k) ?? d;
 
-    private static bool UseOtlpHttp()
+    private static string HostN() =>
+        string.IsNullOrEmpty(Environment.GetEnvironmentVariable("HOSTNAME"))
+            ? Dns.GetHostName()
+            : Environment.GetEnvironmentVariable("HOSTNAME")!;
+
+    private static ResourceBuilder ResB()
     {
-        var m = Environment.GetEnvironmentVariable("OTEL_DEMO_TRACE_EXPORT") ?? "";
-        return m switch
-        {
-            "" => true,
-            "ostream" => false,
-            "otlp" or "http" => true,
-            _ => false,
-        };
-    }
-
-    private static string ResolveHostName()
-    {
-        var h = Environment.GetEnvironmentVariable("HOSTNAME");
-        if (!string.IsNullOrEmpty(h))
-        {
-            return h;
-        }
-
-        try
-        {
-            return Dns.GetHostName();
-        }
-        catch
-        {
-            return "unknown";
-        }
-    }
-
-    private static ResourceBuilder DemoResource()
-    {
-        var instanceId = Environment.GetEnvironmentVariable("OTEL_SERVICE_INSTANCE_ID")
-                          ?? Guid.NewGuid().ToString("N");
-        var deployEnv = Environment.GetEnvironmentVariable("OTEL_ENVIRONMENT")
-                        ?? Environment.GetEnvironmentVariable("DEPLOYMENT_ENVIRONMENT")
-                        ?? "local";
-        var host = ResolveHostName();
+        var iid = Environment.GetEnvironmentVariable("OTEL_SERVICE_INSTANCE_ID")
+                  ?? Guid.NewGuid().ToString("N");
+        var env = Environment.GetEnvironmentVariable("OTEL_ENVIRONMENT")
+                  ?? Environment.GetEnvironmentVariable("DEPLOYMENT_ENVIRONMENT")
+                  ?? "local";
         var tag = Environment.GetEnvironmentVariable("OTEL_DEMO_RESOURCE_TAG");
-
         var b = ResourceBuilder.CreateDefault()
-            .AddService("demo_app", serviceVersion: "1.0.0", autoGenerateServiceInstanceId: false)
-            .AddAttributes(new Dictionary<string, object>
-            {
-                ["service.instance.id"] = instanceId,
-                ["deployment.environment"] = deployEnv,
-                ["host.name"] = host,
-                ["telemetry.sdk.language"] = "csharp",
-                ["telemetry.sdk.name"] = "opentelemetry",
-            });
+            .AddService("demo_app", "1.0.0", autoGenerateServiceInstanceId: false)
+            .AddAttributes(
+                new Dictionary<string, object>
+                {
+                    ["service.instance.id"] = iid,
+                    ["deployment.environment"] = env,
+                    ["host.name"] = HostN(),
+                    ["telemetry.sdk.language"] = "csharp",
+                    ["telemetry.sdk.name"] = "opentelemetry",
+                });
         if (!string.IsNullOrEmpty(tag))
         {
-            b = b.AddAttributes(
-                new Dictionary<string, object> { ["demo.instance.tag"] = tag! });
+            b = b.AddAttributes(new Dictionary<string, object> { ["demo.instance.tag"] = tag! });
         }
 
         return b;
     }
 
-    private static TracerProvider BuildTracerProviderOtlpHttp()
+    private static bool UseOtlp() => GetLo("OTEL_DEMO_TRACE_EXPORT", "") is "" or "otlp" or "http";
+    private static string TrEp() => GetLo("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://127.0.0.1:4318/v1/traces");
+    private static string MxEp() => GetLo("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", TrEp().Replace("/v1/traces", "/v1/metrics", StringComparison.Ordinal));
+
+    public static async Task Main()
     {
-        var endpoint = Environment.GetEnvironmentVariable("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
-                       ?? "http://127.0.0.1:4318/v1/traces";
-
-        var exporterOptions = new OtlpExporterOptions
+        if (GetLo("DEMO_MODE", "pipeline").Equals("exercises", StringComparison.OrdinalIgnoreCase))
         {
-            Endpoint = new Uri(endpoint),
-            Protocol = OtlpExportProtocol.HttpProtobuf,
-            TimeoutMilliseconds = 5000,
-        };
-        var exporter = new OtlpTraceExporter(exporterOptions);
-
-        return Sdk.CreateTracerProviderBuilder()
-            .SetResourceBuilder(DemoResource())
-            .AddSource("demo_app")
-            .AddProcessor(new SimpleActivityExportProcessor(exporter))
-            .Build();
-    }
-
-    private static TracerProvider BuildTracerProviderConsole()
-    {
-        var exporter = new ConsoleActivityExporter(new ConsoleExporterOptions
-        {
-            Targets = ConsoleExporterOutputTargets.Console,
-        });
-
-        return Sdk.CreateTracerProviderBuilder()
-            .SetResourceBuilder(DemoResource())
-            .AddSource("demo_app")
-            .AddProcessor(new SimpleActivityExportProcessor(exporter))
-            .Build();
-    }
-
-    private static void OtelApiExercises(ActivitySource src)
-    {
-        using (src.StartActivity("Outer operation"))
-        {
-            using var inner = src.StartActivity("Inner operation");
-            var current = Activity.Current;
-            var currentMatches = ReferenceEquals(current, inner);
-            Line("OpenTelemetry [1/6]: nested spans; GetCurrentSpan == inner span");
-            if (!currentMatches)
-            {
-                Line("OpenTelemetry [1/6]: note — GetCurrentSpan not equal to inner (check impl.)");
-            }
+            Line("DEMO_MODE=exercises: legacy off — użyj DEMO_MODE=pipeline.");
+            return;
         }
 
-        using (var activity = src.StartActivity("enriched", ActivityKind.Client))
+        var builder = WebApplication.CreateBuilder();
+        var l = GetLo("DEMO_HTTP_ADDR", "0.0.0.0:8080");
+        if (!l.StartsWith("http", StringComparison.OrdinalIgnoreCase))
         {
-            if (activity is not null)
+            l = "http://" + l;
+        }
+
+        builder.WebHost.UseUrls(l);
+
+        if (UseOtlp())
+        {
+            builder.Services.AddOpenTelemetry()
+                .WithTracing(
+                    t => t
+                        .SetResourceBuilder(ResB())
+                        .AddSource(Act.Name)
+                        .AddAspNetCoreInstrumentation()
+                        .AddOtlpExporter(
+                            o =>
+                            {
+                                o.Endpoint = new Uri(TrEp());
+                                o.Protocol = OpenTelemetry.Exporter.OtlpExportProtocol.HttpProtobuf;
+                            }))
+                .WithMetrics(
+                    m => m
+                        .SetResourceBuilder(ResB())
+                        .AddMeter("demo_app")
+                        .AddOtlpExporter(
+                            o =>
+                            {
+                                o.Endpoint = new Uri(MxEp());
+                                o.Protocol = OpenTelemetry.Exporter.OtlpExportProtocol.HttpProtobuf;
+                            }));
+        }
+        else
+        {
+            builder.Services.AddOpenTelemetry()
+                .WithTracing(
+                    t => t
+                        .SetResourceBuilder(ResB())
+                        .AddSource(Act.Name)
+                        .AddAspNetCoreInstrumentation());
+        }
+
+        var app = builder.Build();
+        var path = GetLo("DEMO_HTTP_PATH", "/v1/pipeline");
+        var cid = GetLo("DEMO_CLIENT_ID", "cs");
+
+        var m = new Meter("demo_app", "1.0.0");
+        var msgCount = m.CreateCounter<long>("demo.pipeline.messages", description: "messages processed in node");
+        var hopDuration = m.CreateHistogram<double>("demo.pipeline.hop.duration_ms", description: "hop time ms", unit: "ms");
+
+        app.Lifetime.ApplicationStarted.Register(
+            () => Line($"C# pipeline {l}{path} client_id={cid} (terminal)"));
+
+        app.MapPost(
+            path,
+            async (HttpContext ctx) =>
             {
-                activity.SetTag("http.method", "GET");
-                activity.SetTag("http.status_code", 200);
-                activity.SetTag("work.units", 42.0);
-                activity.SetTag("flag.ok", true);
-                activity.AddEvent(new ActivityEvent("checkpoint"));
-                activity.AddEvent(
-                    new ActivityEvent(
-                        "with_attrs",
-                        tags: new ActivityTagsCollection
+                var t0 = Stopwatch.GetTimestamp();
+                using (Act.StartActivity("pipeline.hop", kind: ActivityKind.Server))
+                {
+                    ctx.Request.EnableBuffering();
+                    string text;
+                    using (var r = new StreamReader(ctx.Request.Body, Encoding.UTF8, leaveOpen: true))
+                    {
+                        text = await r.ReadToEndAsync();
+                    }
+
+                    JsonDocument jdoc;
+                    try
+                    {
+                        jdoc = JsonDocument.Parse(
+                            string.IsNullOrEmpty(text) ? "{}" : text);
+                    }
+                    catch
+                    {
+                        return Results.BadRequest("Invalid JSON");
+                    }
+
+                    if (jdoc.RootElement.ValueKind != JsonValueKind.Object)
+                    {
+                        return Results.BadRequest("JSON must be an object");
+                    }
+
+                    var root = jdoc.RootElement;
+                    var c0 = int.Parse(root.GetProperty("counter").GetString() ?? "0");
+                    var list = new List<string>();
+                    if (root.TryGetProperty("table_of_clients", out var tc)
+                        && tc.ValueKind == JsonValueKind.Array)
+                    {
+                        foreach (var e in tc.EnumerateArray())
                         {
-                            { "step", "after_io" },
-                            { "rc", 0 },
-                        }));
-                Line("OpenTelemetry [2/6]: attributes, events, SpanKind::CLIENT (export: stderr albo OTLP/HTTP)");
-                activity.SetStatus(ActivityStatusCode.Ok);
-            }
-        }
+                            if (e.ValueKind == JsonValueKind.String)
+                            {
+                                list.Add(e.GetString()!);
+                            }
+                        }
+                    }
 
-        using (var activity = src.StartActivity("original_name"))
-        {
-            if (activity is not null)
-            {
-                activity.DisplayName = "renamed_op";
-                activity.SetStatus(ActivityStatusCode.Error, "synthetic failure for status path");
-            }
-        }
+                    c0++;
+                    list.Add(cid);
+                    var outJ = new
+                    {
+                        counter = c0.ToString(),
+                        table_of_clients = list,
+                    };
 
-        Line("OpenTelemetry [3/6]: UpdateName, SetStatus(Error)");
+                    hopDuration.Record(Stopwatch.GetElapsedTime(t0).TotalMilliseconds);
+                    msgCount.Add(1);
+                    return Results.Json(outJ);
+                }
+            });
 
-        Activity.Current = null;
-        using (var activity = src.StartActivity("explicit_root"))
-        {
-            Line("OpenTelemetry [4/6]: root span (Activity.Current=null przed start = brak parent trace)");
-            activity?.SetStatus(ActivityStatusCode.Ok);
-        }
-
-        bool rec;
-        using (var activity = src.StartActivity("recording_probe"))
-        {
-            rec = activity?.IsAllDataRequested ?? false;
-            activity?.SetStatus(ActivityStatusCode.Ok);
-        }
-
-        if (rec)
-        {
-            Line("OpenTelemetry [5/6]: IsRecording() == true (SDK span)");
-        }
-        else
-        {
-            Line("OpenTelemetry [5/6]: IsRecording() == false (unexpected with SDK — check config)");
-        }
-
-        bool valid;
-        using (var activity = src.StartActivity("context_probe"))
-        {
-            valid = activity?.Context.IsValid() ?? false;
-            activity?.SetStatus(ActivityStatusCode.Ok);
-        }
-
-        if (valid)
-        {
-            Line("OpenTelemetry [6/6]: GetContext().IsValid() == true");
-        }
-        else
-        {
-            Line("OpenTelemetry [6/6]: GetContext().IsValid() == false (unexpected with SDK)");
-        }
-    }
-
-    private static int Main(string[] args)
-    {
-        Line($"It just works (C# client, t={DateTime.Now:yyyy-MM-dd HH:mm:ss})");
-
-        TracerProvider provider;
-        if (UseOtlpHttp())
-        {
-            Line("OTEL_DEMO_TRACE_EXPORT=otlp: eksport HTTP (endpoint: OTEL_EXPORTER_OTLP_*)");
-            provider = BuildTracerProviderOtlpHttp();
-        }
-        else
-        {
-            Line("Domyślnie ostream/console. OTLP/HTTP: export OTEL_DEMO_TRACE_EXPORT=otlp");
-            provider = BuildTracerProviderConsole();
-        }
-
-        using (provider)
-        using (var activitySource = new ActivitySource("demo_app", "1.0.0"))
-        {
-            Line("C# client — simple demo (args + sleep)");
-            if (args.Length == 0)
-            {
-                Line("No arguments. Try: dotnet run -- hello world");
-            }
-            else
-            {
-                Line($"Arguments: {string.Join(' ', args)}");
-            }
-
-            OtelApiExercises(activitySource);
-
-            var start = Stopwatch.GetTimestamp();
-            Thread.Sleep(50);
-            Line($"Elapsed: {Stopwatch.GetElapsedTime(start)}");
-
-            Line("OpenTelemetry: zakończone (console vs OTLP — patrz OTEL_DEMO_TRACE_EXPORT).");
-            provider.ForceFlush();
-        }
-
-        return 0;
+        await app.RunAsync();
     }
 }
