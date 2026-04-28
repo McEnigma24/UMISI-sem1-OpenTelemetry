@@ -2,6 +2,8 @@
 //! `clients/python/_src/main.py` / `clients/cpp/_src/main.cpp`.
 //! Endpoint: `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` (domyślnie `http://127.0.0.1:4318/v1/traces`).
 //! Tryb: `OTEL_DEMO_TRACE_EXPORT` — puste / `otlp` / `http` → OTLP; `ostream` → stdout (jak ConsoleSpanExporter w Pythonie).
+//!
+//! Resource: `OTEL_SERVICE_INSTANCE_ID`, `OTEL_ENVIRONMENT` / `DEPLOYMENT_ENVIRONMENT`, `OTEL_DEMO_RESOURCE_TAG` (→ `demo.instance.tag`).
 
 use std::env;
 use std::time::{Duration, Instant, SystemTime};
@@ -15,6 +17,7 @@ use opentelemetry::KeyValue;
 use opentelemetry_otlp::{Protocol, SpanExporter, WithExportConfig};
 use opentelemetry_sdk::trace::SdkTracerProvider;
 use opentelemetry_sdk::Resource;
+use uuid::Uuid;
 
 fn line(msg: &str) {
     println!("{msg}");
@@ -33,10 +36,26 @@ fn use_otlp_http() -> bool {
 }
 
 fn demo_resource() -> Resource {
-    Resource::builder_empty()
+    let instance_id = env::var("OTEL_SERVICE_INSTANCE_ID").unwrap_or_else(|_| Uuid::new_v4().to_string());
+    let deploy_env = env::var("OTEL_ENVIRONMENT")
+        .or_else(|_| env::var("DEPLOYMENT_ENVIRONMENT"))
+        .unwrap_or_else(|_| "local".to_string());
+    let host = env::var("HOSTNAME").unwrap_or_else(|_| "unknown".to_string());
+    let mut b = Resource::builder_empty()
         .with_service_name("demo_app")
         .with_attribute(KeyValue::new("service.version", "1.0.0"))
-        .build()
+        .with_attribute(KeyValue::new("service.instance.id", instance_id))
+        .with_attribute(KeyValue::new("deployment.environment", deploy_env))
+        .with_attribute(KeyValue::new("host.name", host))
+        .with_attribute(KeyValue::new("telemetry.sdk.language", "rust"))
+        .with_attribute(KeyValue::new("telemetry.sdk.name", "opentelemetry"));
+    if let Ok(tag) = env::var("OTEL_DEMO_RESOURCE_TAG") {
+        let t = tag.trim();
+        if !t.is_empty() {
+            b = b.with_attribute(KeyValue::new("demo.instance.tag", t.to_string()));
+        }
+    }
+    b.build()
 }
 
 fn init_tracer_otlp_http() -> SdkTracerProvider {

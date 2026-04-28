@@ -22,6 +22,10 @@
 #include <cstring>
 #include <iostream>
 #include <memory>
+#include <sstream>
+#include <string>
+#include <unordered_map>
+#include <unistd.h>
 
 namespace
 {
@@ -60,9 +64,69 @@ bool use_otlp_http_export()
     return false;
 }
 
+static std::string demo_instance_id()
+{
+  if (const char *s = std::getenv("OTEL_SERVICE_INSTANCE_ID"); s && s[0] != '\0')
+  {
+    return std::string(s);
+  }
+  char   buf[256]{};
+  int    err = ::gethostname(buf, sizeof(buf) - 1);
+  if (err != 0)
+  {
+    std::strncpy(buf, "unknown", sizeof(buf) - 1);
+  }
+  std::ostringstream oss;
+  oss << buf << '-' << static_cast<int>(getpid());
+  return oss.str();
+}
+
+static std::string demo_host_name()
+{
+  if (const char *s = std::getenv("HOSTNAME"); s && s[0] != '\0')
+  {
+    return std::string(s);
+  }
+  char buf[256]{};
+  if (::gethostname(buf, sizeof(buf) - 1) == 0)
+  {
+    return std::string(buf);
+  }
+  return "unknown";
+}
+
+static std::string demo_deploy_env()
+{
+  if (const char *s = std::getenv("OTEL_ENVIRONMENT"); s && s[0] != '\0')
+  {
+    return std::string(s);
+  }
+  if (const char *s = std::getenv("DEPLOYMENT_ENVIRONMENT"); s && s[0] != '\0')
+  {
+    return std::string(s);
+  }
+  return "local";
+}
+
+opentelemetry::sdk::resource::Resource demo_resource()
+{
+  std::unordered_map<std::string, std::string> attrs;
+  attrs["service.name"]           = "demo_app";
+  attrs["service.version"]        = "1.0.0";
+  attrs["service.instance.id"]    = demo_instance_id();
+  attrs["deployment.environment"] = demo_deploy_env();
+  attrs["host.name"]              = demo_host_name();
+  attrs["telemetry.sdk.language"] = "cpp";
+  attrs["telemetry.sdk.name"]     = "opentelemetry";
+  if (const char *t = std::getenv("OTEL_DEMO_RESOURCE_TAG"); t && t[0] != '\0')
+  {
+    attrs["demo.instance.tag"] = t;
+  }
+  return opentelemetry::sdk::resource::Resource::Create(attrs);
+}
+
 std::shared_ptr<trace_sdk::TracerProvider> g_sdk_tracer_provider;
 
-/** SDK + OStreamSpanExporter — spany na stderr (ten sam proces, czytelny zrzut). */
 void init_tracer_export_to_cerr()
 {
     auto exporter  = trace_exp::OStreamSpanExporterFactory::Create(std::cerr);
@@ -70,7 +134,7 @@ void init_tracer_export_to_cerr()
 
     // można użyć BatchSpanProcessor //
 
-    const auto resource = opentelemetry::sdk::resource::Resource::Create({{"service.name", "demo_app"}, {"service.version", "1.0.0"}});
+    const auto resource = demo_resource();
     auto up = trace_sdk::TracerProviderFactory::Create(std::move(processor), resource);
     g_sdk_tracer_provider = std::shared_ptr<trace_sdk::TracerProvider>(std::move(up));
     std::shared_ptr<trace_api::TracerProvider> api = g_sdk_tracer_provider;
@@ -92,7 +156,7 @@ void init_tracer_otlp_http()
     // można użyć BatchSpanProcessor //  -> tam można nazbierać kolejkę -> batch przerzucić do wysłania na osobny wątek
     // główny zbiera wtedy kolejne logi -> zapiełni się to odpala następny wątek .itd
 
-    const auto resource = opentelemetry::sdk::resource::Resource::Create({{"service.name", "demo_app"}, {"service.version", "1.0.0"}});
+    const auto resource = demo_resource();
     auto up = trace_sdk::TracerProviderFactory::Create(std::move(processor), resource);
     g_sdk_tracer_provider = std::shared_ptr<trace_sdk::TracerProvider>(std::move(up));
     std::shared_ptr<trace_api::TracerProvider> api = g_sdk_tracer_provider;

@@ -6,5 +6,7 @@ COPY config.yaml /etc/otelcol/config.yaml
 
 EXPOSE 4317
 EXPOSE 4318
+# prometheus exporter (scraping z kontenera prometheus w Compose)
+EXPOSE 8889
 
 CMD ["--config=/etc/otelcol/config.yaml"]

@@ -63,3 +63,15 @@ docker run --rm -it \
 
 docker pull python:3.10-slim
 docker pull otel/opentelemetry-collector-contrib:latest
+
+# — Stack z docker-compose: Jaeger, OTel Collector, Prometheus, Grafana + klienci
+# docker compose up -d --build
+#   Jaeger:      http://localhost:16686     (trace’y, UI własne)
+#   Prometheus:  http://localhost:9090     (metryki: scrape collectora, nie Jaegera)
+#   Grafana:     http://localhost:3000     (admin / admin) — datasources: Prometheus + Jaeger
+# Walidacja compose (nie uruchamia kontenerów):
+#   docker compose config
+# Opcjonalne atrybuty resource na trace’ach (klienci — Python/Rust/C#/C++):
+#   OTEL_SERVICE_INSTANCE_ID
+#   OTEL_ENVIRONMENT / DEPLOYMENT_ENVIRONMENT
+#   OTEL_DEMO_RESOURCE_TAG  (→ demo.instance.tag w backendzie)

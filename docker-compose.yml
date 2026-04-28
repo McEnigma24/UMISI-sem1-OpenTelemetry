@@ -1,8 +1,20 @@
-#   docker compose logs -f otel          # trace’y z `debug` exp.
+#   docker compose logs -f otel          # trace’y z `debug` + eksport do Jaegera
 #   docker compose up --scale client-python=2
 #   docker compose up otel               # sam Collector, klient ręcznie z hosta
 #
+# Obrazy: oficjalne (grafana/grafana, prom/prometheus, jaegertracing/all-in-one) — dobre wsparcie
+# w dokumentacji. Docker Hardened Images (dhi/...) pod FIPS/CIS, na lokalne demo zwykle niepotrzebne.
+#
+# UI: Jaeger http://localhost:16686  |  Prometheus http://localhost:9090  |  Grafana http://localhost:3000 (admin/admin)
+#
 services:
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    ports:
+      - "16686:16686"
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+
   otel:
     build:
       context: ./server/otel
@@ -10,8 +22,35 @@ services:
     ports:
       - "4317:4317"
       - "4318:4318"
-    # Collector końcowy — zostawiamy, żeby w logach widać było trace’y z `debug` exp.
-    # restart: unless-stopped
+    # 8889 tylko w sieci Dockera (Prometheus skrapuje otel:8889)
+    depends_on:
+      jaeger:
+        condition: service_started
+
+  prometheus:
+    image: prom/prometheus:latest
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+    volumes:
+      - ./server/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    depends_on:
+      otel:
+        condition: service_started
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - ./server/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+    depends_on:
+      - prometheus
+      - jaeger
 
   client-rust:
     build:
@@ -22,6 +61,8 @@ services:
     environment:
       OTEL_DEMO_TRACE_EXPORT: otlp
       OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://otel:4318/v1/traces
+      OTEL_ENVIRONMENT: local
+      OTEL_DEMO_RESOURCE_TAG: lang-rust
     depends_on:
       otel:
         condition: service_started
@@ -33,6 +74,8 @@ services:
     environment:
       OTEL_DEMO_TRACE_EXPORT: otlp
       OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://otel:4318/v1/traces
+      OTEL_ENVIRONMENT: local
+      OTEL_DEMO_RESOURCE_TAG: lang-python
     depends_on:
       otel:
         condition: service_started
@@ -44,6 +87,8 @@ services:
     environment:
       OTEL_DEMO_TRACE_EXPORT: otlp
       OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://otel:4318/v1/traces
+      OTEL_ENVIRONMENT: local
+      OTEL_DEMO_RESOURCE_TAG: lang-csharp
     depends_on:
       otel:
         condition: service_started

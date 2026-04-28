@@ -3,12 +3,19 @@
 Prosty klient OpenTelemetry (OTLP/HTTP, JSON) — odpowiednik clients/cpp/_src/main.cpp.
 Przed uruchomieniem: opcjonalnie słuchacz np. clients/cpp/listen_otlp_http.sh 4318
 Endpoint: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT (domyślnie http://127.0.0.1:4318/v1/traces).
+
+Resource (atrybuty na trace’ach):
+  OTEL_SERVICE_INSTANCE_ID — opcj.; brak → losowy UUID na start
+  OTEL_ENVIRONMENT albo DEPLOYMENT_ENVIRONMENT — np. local, dev (domyślnie: local)
+  OTEL_DEMO_RESOURCE_TAG — opcj.; np. instancja w stacku; trafia do demo.instance.tag
 """
 from __future__ import annotations
 
 import os
+import socket
 import sys
 import time
+import uuid
 
 from opentelemetry import context as otel_context
 from opentelemetry import trace
@@ -31,6 +38,27 @@ def _line(msg: str) -> None:
     print(msg, flush=True)
 
 
+def _build_resource() -> Resource:
+    instance_id = os.environ.get("OTEL_SERVICE_INSTANCE_ID") or str(uuid.uuid4())
+    env = os.environ.get("OTEL_ENVIRONMENT") or os.environ.get(
+        "DEPLOYMENT_ENVIRONMENT", "local"
+    )
+    tag = os.environ.get("OTEL_DEMO_RESOURCE_TAG", "").strip()
+    host = socket.gethostname()
+    attrs: dict = {
+        "service.name": "demo_app",
+        "service.version": "1.0.0",
+        "service.instance.id": instance_id,
+        "deployment.environment": env,
+        "host.name": host,
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+    }
+    if tag:
+        attrs["demo.instance.tag"] = tag
+    return Resource.create(attrs)
+
+
 def _use_otlp_http() -> bool:
     m = os.environ.get("OTEL_DEMO_TRACE_EXPORT", "")
     if not m:
@@ -51,12 +79,7 @@ def _init_tracer_otlp_http() -> TracerProvider:
         endpoint=endpoint,
         timeout=5,  # sekundy (C++: std::chrono::seconds(5))
     )
-    resource = Resource.create(
-        {
-            "service.name": "demo_app",
-            "service.version": "1.0.0",
-        }
-    )
+    resource = _build_resource()
     provider = TracerProvider(sampler=ALWAYS_ON, resource=resource)
     provider.add_span_processor(SimpleSpanProcessor(exporter))
     trace.set_tracer_provider(provider)
@@ -66,12 +89,7 @@ def _init_tracer_otlp_http() -> TracerProvider:
 def _init_tracer_stdout() -> TracerProvider:
     from opentelemetry.sdk.trace.export import ConsoleSpanExporter
 
-    resource = Resource.create(
-        {
-            "service.name": "demo_app",
-            "service.version": "1.0.0",
-        }
-    )
+    resource = _build_resource()
     provider = TracerProvider(sampler=ALWAYS_ON, resource=resource)
     provider.add_span_processor(
         SimpleSpanProcessor(ConsoleSpanExporter(out=sys.stderr))

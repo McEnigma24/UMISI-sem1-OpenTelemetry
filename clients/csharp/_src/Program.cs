@@ -3,8 +3,12 @@
  * clients/python/_src/main.py / clients/rust/_src/main.rs.
  * Endpoint: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT (domyślnie http://127.0.0.1:4318/v1/traces).
  * Tryb: OTEL_DEMO_TRACE_EXPORT — puste / otlp / http → OTLP; ostream → console; inne (jak Python) → console.
+ *
+ * Resource: OTEL_SERVICE_INSTANCE_ID, OTEL_ENVIRONMENT / DEPLOYMENT_ENVIRONMENT, OTEL_DEMO_RESOURCE_TAG.
  */
+using System.Collections.Generic;
 using System.Diagnostics;
+using System.Net;
 using OpenTelemetry;
 using OpenTelemetry.Exporter;
 using OpenTelemetry.Resources;
@@ -28,6 +32,53 @@ internal static class Program
         };
     }
 
+    private static string ResolveHostName()
+    {
+        var h = Environment.GetEnvironmentVariable("HOSTNAME");
+        if (!string.IsNullOrEmpty(h))
+        {
+            return h;
+        }
+
+        try
+        {
+            return Dns.GetHostName();
+        }
+        catch
+        {
+            return "unknown";
+        }
+    }
+
+    private static ResourceBuilder DemoResource()
+    {
+        var instanceId = Environment.GetEnvironmentVariable("OTEL_SERVICE_INSTANCE_ID")
+                          ?? Guid.NewGuid().ToString("N");
+        var deployEnv = Environment.GetEnvironmentVariable("OTEL_ENVIRONMENT")
+                        ?? Environment.GetEnvironmentVariable("DEPLOYMENT_ENVIRONMENT")
+                        ?? "local";
+        var host = ResolveHostName();
+        var tag = Environment.GetEnvironmentVariable("OTEL_DEMO_RESOURCE_TAG");
+
+        var b = ResourceBuilder.CreateDefault()
+            .AddService("demo_app", serviceVersion: "1.0.0", autoGenerateServiceInstanceId: false)
+            .AddAttributes(new Dictionary<string, object>
+            {
+                ["service.instance.id"] = instanceId,
+                ["deployment.environment"] = deployEnv,
+                ["host.name"] = host,
+                ["telemetry.sdk.language"] = "csharp",
+                ["telemetry.sdk.name"] = "opentelemetry",
+            });
+        if (!string.IsNullOrEmpty(tag))
+        {
+            b = b.AddAttributes(
+                new Dictionary<string, object> { ["demo.instance.tag"] = tag! });
+        }
+
+        return b;
+    }
+
     private static TracerProvider BuildTracerProviderOtlpHttp()
     {
         var endpoint = Environment.GetEnvironmentVariable("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
@@ -42,8 +93,7 @@ internal static class Program
         var exporter = new OtlpTraceExporter(exporterOptions);
 
         return Sdk.CreateTracerProviderBuilder()
-            .SetResourceBuilder(
-                ResourceBuilder.CreateDefault().AddService("demo_app", serviceVersion: "1.0.0"))
+            .SetResourceBuilder(DemoResource())
             .AddSource("demo_app")
             .AddProcessor(new SimpleActivityExportProcessor(exporter))
             .Build();
@@ -57,8 +107,7 @@ internal static class Program
         });
 
         return Sdk.CreateTracerProviderBuilder()
-            .SetResourceBuilder(
-                ResourceBuilder.CreateDefault().AddService("demo_app", serviceVersion: "1.0.0"))
+            .SetResourceBuilder(DemoResource())
             .AddSource("demo_app")
             .AddProcessor(new SimpleActivityExportProcessor(exporter))
             .Build();

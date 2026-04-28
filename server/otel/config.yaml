@@ -1,5 +1,5 @@
-# OpenTelemetry Collector (contrib) — odbiór OTLP, podgląd w logach (debug exporter).
-# Porty: 4317 gRPC, 4318 HTTP (jak w spec). Klienci: np. http://host:4318/v1/traces
+# OpenTelemetry Collector (contrib) — OTLP, trace’y: Jaeger (OTLP) + logi: debug; metryki: endpoint do scrapu Prometheusa
+# Klienci: 4317 gRPC, 4318 HTTP. Prometheus w Compose skrapuje: otel:8889
 receivers:
   otlp:
     protocols:
@@ -14,18 +14,24 @@ processors:
 exporters:
   debug:
     verbosity: detailed
-    # stdout — w `docker logs`; do produkcji: otlp/jaeger/prometheus itd.
+  # Jaeger all-in-one: odbiornik OTLP gRPC (sieć Docker: host jaeger, port 4317)
+  otlp/jaeger:
+    endpoint: jaeger:4317
+    tls:
+      insecure: true
+  prometheus:
+    endpoint: 0.0.0.0:8889
 
 service:
   pipelines:
     traces:
       receivers: [otlp]
       processors: [batch]
-      exporters: [debug]
+      exporters: [debug, otlp/jaeger]
     metrics:
       receivers: [otlp]
       processors: [batch]
-      exporters: [debug]
+      exporters: [prometheus]
     logs:
       receivers: [otlp]
       processors: [batch]
