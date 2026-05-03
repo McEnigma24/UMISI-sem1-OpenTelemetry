@@ -8,3 +8,5 @@ docker run --rm -it \
   -e OTEL_DEMO_RESOURCE_TAG=lang-rust \
   -v "$(pwd)/docker-target:/app/target" \
   client_rust
+
+docker container prune -f

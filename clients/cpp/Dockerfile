@@ -1,30 +1,66 @@
-FROM ubuntu:latest
-
+# ==========================================
+# 1. WARSTWA: RUNTIME BASE (wspólny fundament — tylko .so do uruchomienia)
+# ==========================================
+FROM ubuntu:22.04 AS runtime-base
 ENV DEBIAN_FRONTEND=noninteractive \
     NEEDRESTART_MODE=a \
     TERM=xterm-256color
 
-WORKDIR /app
-
 RUN apt-get update -y && apt-get upgrade -y
 
-RUN apt-get install -y make
-RUN apt-get install -y cmake
-RUN apt-get install -y build-essential
-RUN apt-get install -y gcc
-RUN apt-get install -y g++
-RUN apt-get install -y libstdc++-11-dev
-RUN apt-get install -y libomp-dev
-RUN apt-get install -y libbenchmark-dev
-RUN apt-get install -y libcurl4-openssl-dev
-RUN apt-get install -y libprotobuf-dev
-RUN apt-get install -y protobuf-compiler
-RUN apt-get install -y git git ca-certificates
+RUN apt-get install -y --no-install-recommends ca-certificates
+RUN apt-get install -y --no-install-recommends libssl3
+RUN apt-get install -y --no-install-recommends libcurl4
+RUN apt-get install -y --no-install-recommends libprotobuf23
+RUN apt-get install -y --no-install-recommends libgomp1
+RUN apt-get install -y --no-install-recommends zlib1g
 
-COPY . .
+RUN rm -rf /var/lib/apt/lists/*
 
-RUN chmod +x ./Docker_start.sh
+# ==========================================
+# 2. WARSTWA: DEV / BUILDER (jak Dockerfile_old + ninja/libssl-dev z szablonu)
+# Dziedziczy po runtime-base
+# ==========================================
+FROM runtime-base AS dev-env
+RUN apt-get update -y && apt-get upgrade -y
 
-# CMD ["./Docker_start.sh"]
+RUN apt-get install -y --no-install-recommends make
+RUN apt-get install -y --no-install-recommends cmake
+RUN apt-get install -y --no-install-recommends ninja-build
+RUN apt-get install -y --no-install-recommends build-essential
+RUN apt-get install -y --no-install-recommends gcc
+RUN apt-get install -y --no-install-recommends g++
+RUN apt-get install -y --no-install-recommends libstdc++-11-dev
+RUN apt-get install -y --no-install-recommends libomp-dev
+RUN apt-get install -y --no-install-recommends libbenchmark-dev
+RUN apt-get install -y --no-install-recommends libcurl4-openssl-dev
+RUN apt-get install -y --no-install-recommends libssl-dev
+RUN apt-get install -y --no-install-recommends libprotobuf-dev
+RUN apt-get install -y --no-install-recommends protobuf-compiler
+RUN apt-get install -y --no-install-recommends git
+RUN apt-get install -y --no-install-recommends ca-certificates
 
+RUN rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace
+
+# ==========================================
+# 3. ETAP: BUILD
+# ==========================================
+FROM dev-env AS builder
+# -v "$(pwd):/workspace"
 CMD ["/bin/sh", "-c", "sleep 2 && exec ./Docker_start.sh"]
+
+# ==========================================
+# 4. ETAP: RUNNER — binarka z volumenu exe/, patrz docker_run
+# ==========================================
+FROM runtime-base AS runner
+WORKDIR /app
+
+RUN mkdir -p exe log output input run_time_config build
+COPY ./input /app/input
+COPY ./run_time_config /app/run_time_config
+COPY ./build/OpenTelemetry.exe /app/build/
+COPY ./build/external/opentelemetry-cpp/libopentelemetry_proto.so /app/build/
+ENV LD_LIBRARY_PATH=/app/build
+CMD ["/bin/sh", "-c", "sleep 2 && exec /app/build/OpenTelemetry.exe"]

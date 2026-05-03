@@ -24,7 +24,6 @@
 #include <memory>
 #include <sstream>
 #include <string>
-#include <unordered_map>
 #include <unistd.h>
 
 namespace
@@ -110,17 +109,17 @@ static std::string demo_deploy_env()
 
 opentelemetry::sdk::resource::Resource demo_resource()
 {
-  std::unordered_map<std::string, std::string> attrs;
-  attrs["service.name"]           = "demo_app";
-  attrs["service.version"]        = "1.0.0";
+  opentelemetry::sdk::resource::ResourceAttributes attrs;
+  attrs["service.name"]           = std::string("demo_app");
+  attrs["service.version"]        = std::string("1.0.0");
   attrs["service.instance.id"]    = demo_instance_id();
   attrs["deployment.environment"] = demo_deploy_env();
   attrs["host.name"]              = demo_host_name();
-  attrs["telemetry.sdk.language"] = "cpp";
-  attrs["telemetry.sdk.name"]     = "opentelemetry";
+  attrs["telemetry.sdk.language"] = std::string("cpp");
+  attrs["telemetry.sdk.name"]     = std::string("opentelemetry");
   if (const char *t = std::getenv("OTEL_DEMO_RESOURCE_TAG"); t && t[0] != '\0')
   {
-    attrs["demo.instance.tag"] = t;
+    attrs["demo.instance.tag"] = std::string(t);
   }
   return opentelemetry::sdk::resource::Resource::Create(attrs);
 }

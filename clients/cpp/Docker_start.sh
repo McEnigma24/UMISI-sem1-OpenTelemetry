@@ -10,7 +10,6 @@ source config
 # # # # # # # # # # # # # # # #
 
 var_start=""; var_end="";
-SCRIPT="./run.sh"
 LOG="$DIR_ROOT/$DIR_OUTPUT/start.log"
 PATH_DONE_install="${DIR_RUN_TIME_CONFIG}/DONE_installed.txt"
 
@@ -137,7 +136,8 @@ env_prep "$@"
 timer_start
 {
     cd scripts
-    script -q -c "$SCRIPT 2>&1" /dev/null | tee $LOG
+    # script -q -c "./run.sh 2>&1" /dev/null | tee $LOG
+    script -q -c "./production.sh 2>&1" /dev/null | tee $LOG
 }
 timer_end
 

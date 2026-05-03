@@ -87,6 +87,8 @@ set(BUILD_TESTING OFF CACHE BOOL "Build tests" FORCE)
 # )
 
 # FetchContent_MakeAvailable(opentelemetry-cpp)
+# # Biblioteki shared OTel nie są w slim runnerze Docker — linkujemy OTel statycznie do exe.
+# set(BUILD_SHARED_LIBS OFF CACHE BOOL "OpenTelemetry jako .a (jedna binarka pod Docker/runtime)" FORCE)
 add_subdirectory(external/opentelemetry-cpp)
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL "12")

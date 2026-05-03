@@ -110,7 +110,6 @@ services:
       timeout: 3s
       retries: 30
       start_period: 60s
-
   client-csharp:
     build:
       context: ./clients/csharp

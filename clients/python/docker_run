@@ -7,3 +7,5 @@ docker run --rm -it \
   -e OTEL_ENVIRONMENT=local \
   -e OTEL_DEMO_RESOURCE_TAG=lang-python \
   client_python
+
+docker container prune -f

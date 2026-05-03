@@ -9,3 +9,5 @@ docker run --rm -it \
   client_csharp
 
   # -v "$(pwd)/build-docker:/app/build" \
+
+docker container prune -f
