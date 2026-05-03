@@ -278,7 +278,7 @@ void opentelemetry_api_exercises(const opentelemetry::nostd::shared_ptr<Tracer> 
 int main(int argc, char* argv[])
 {
     srand(time(NULL));
-    CORE::clear_terminal();
+    // CORE::clear_terminal();
     time_stamp("It just works");
 
     // const bool otlp = use_otlp_http_export();   //  exported variable determines

@@ -27,7 +27,7 @@ add_definitions(-DSOURCE_PATH_SIZE=${SOURCE_PATH_SIZE})
 # OpenTelemetry___CTEST_ACTIVE
 # OpenTelemetry___BUILD_LIBRARY
 
-set(CONST_TARGET_NAME "OpenTelemetry")
+set(CONST_TARGET_NAME "cpp_client")
 
 # COMPILER FLAGS #
 
@@ -53,21 +53,22 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fopenmp")
 
 
 # 1 - core #
-# include(FetchContent)
-# FetchContent_Declare(
-#     core
-#     GIT_REPOSITORY ${CORE_GIT_REPO}
-#     GIT_TAG        main # lub inny tag/commit
-#     GIT_SHALLOW    TRUE
-# )
-# FetchContent_MakeAvailable(core)
+include(FetchContent)
+FetchContent_Declare(
+    core
+    GIT_REPOSITORY https://github.com/McEnigma24/CORE_lib.git
+    GIT_TAG        main # lub inny tag/commit
+    GIT_SHALLOW    TRUE
+    UPDATE_DISCONNECTED ON
+)
+FetchContent_MakeAvailable(core)
 
-# set(ALL_LIBRARIES ${ALL_LIBRARIES} core)
-# include_directories(${core_SOURCE_DIR}/_inc)
-
-add_subdirectory(external/core)
-include_directories(${CMAKE_CURRENT_SOURCE_DIR}/external/core/_inc)
 set(ALL_LIBRARIES ${ALL_LIBRARIES} core)
+include_directories(${core_SOURCE_DIR}/_inc)
+
+# add_subdirectory(external/core)
+# include_directories(${CMAKE_CURRENT_SOURCE_DIR}/external/core/_inc)
+# set(ALL_LIBRARIES ${ALL_LIBRARIES} core)
 
 
 
@@ -77,19 +78,19 @@ set(WITH_BENCHMARK OFF CACHE BOOL "OpenTelemetry: benchmark executables" FORCE)
 set(_otel_saved_BUILD_TESTING "${BUILD_TESTING}")
 set(BUILD_TESTING OFF CACHE BOOL "Build tests" FORCE)
 
-# include(FetchContent)
-# FetchContent_Declare(
-#     opentelemetry-cpp
-#     GIT_REPOSITORY https://github.com/open-telemetry/opentelemetry-cpp.git
-#     GIT_TAG        v1.20.0
-#     GIT_SHALLOW    TRUE
-#     UPDATE_DISCONNECTED ON
-# )
+include(FetchContent)
+FetchContent_Declare(
+    opentelemetry-cpp
+    GIT_REPOSITORY https://github.com/open-telemetry/opentelemetry-cpp.git
+    GIT_TAG        v1.20.0
+    GIT_SHALLOW    TRUE
+    UPDATE_DISCONNECTED ON
+)
 
-# FetchContent_MakeAvailable(opentelemetry-cpp)
+FetchContent_MakeAvailable(opentelemetry-cpp)
 # # Biblioteki shared OTel nie są w slim runnerze Docker — linkujemy OTel statycznie do exe.
 # set(BUILD_SHARED_LIBS OFF CACHE BOOL "OpenTelemetry jako .a (jedna binarka pod Docker/runtime)" FORCE)
-add_subdirectory(external/opentelemetry-cpp)
+# add_subdirectory(external/opentelemetry-cpp)
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL "12")
     if(TARGET opentelemetry_metrics)

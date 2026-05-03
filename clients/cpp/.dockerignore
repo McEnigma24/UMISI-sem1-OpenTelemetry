@@ -1,13 +1,3 @@
-# Lokalny CMake — w obrazie i tak powstaje na nowo (run.sh / start.sh)
-# build/
-
-# Artefakty uruchomieniowe / logi z hosta
-# exe/
-# log/
-# output/
-# input/
-# run_time_config/
-
 # Repozytorium (niepotrzebne do kompilacji w kontenerze; duże)
 .git/
 

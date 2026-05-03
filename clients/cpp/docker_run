@@ -1,8 +1,11 @@
 img_name="runner"
 
+
 docker build --target "$img_name" -t "client_cpp-$img_name" .
 
 docker image prune -f
+
+
 
 docker run --rm -it \
   --add-host=host.docker.internal:host-gateway \
