@@ -57,6 +57,7 @@ RUN mkdir -p exe log output input run_time_config build
 COPY ./input /app/input
 COPY ./run_time_config /app/run_time_config
 COPY ./build/cpp_client.exe /app/build/
-COPY ./build/external/opentelemetry-cpp/libopentelemetry_proto.so /app/build/
+# needed run-time lib (could be changed to static lib and be merged at compile time, but I leave it as is for now)
+COPY ./build/_deps/opentelemetry-cpp-build/libopentelemetry_proto.so /app/build/
 ENV LD_LIBRARY_PATH=/app/build
 CMD ["/bin/sh", "-c", "sleep 2 && exec /app/build/cpp_client.exe"]
