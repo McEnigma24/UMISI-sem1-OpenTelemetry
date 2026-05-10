@@ -1,8 +1,5 @@
 /*
- * HTTP pipeline (C#). POST DEMO_HTTP_PATH — JSON z ``route``.
- *
- * DEMO_VERBOSE_FRAMEWORK_LOGS — true/1/yes: więcej logów Microsoft/System.Net.Http/OpenTelemetry;
- *   domyślnie (false) — tylko Warning+ dla frameworka (ciszej niż domyślne ASP.NET).
+ * HTTP pipeline (C#). POST DEMO_HTTP_PATH — JSON z opcjonalnym ``route`` (pierwszy segment = gateway).
  */
 using System.Collections;
 using System.Collections.Generic;
@@ -15,8 +12,6 @@ using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using System.Text.Json.Serialization;
-using System.Text.Json.Serialization.Metadata;
 using Microsoft.Extensions.Logging;
 using OpenTelemetry;
 using OpenTelemetry.Exporter;
@@ -29,17 +24,7 @@ namespace OtelDemo;
 public static class Program
 {
     private static readonly ActivitySource Act = new("demo_app", "1.0.0");
-    private static readonly JsonSerializerOptions s_pipelineJson = new()
-    {
-        WriteIndented = false,
-        TypeInfoResolver = new DefaultJsonTypeInfoResolver(),
-    };
-
     private static void CsLine(string m) => Console.WriteLine($"{DateTime.Now:HH:mm:ss.fff} {m}");
-
-    private static string NodeToJsonString(JsonNode? node) =>
-        node is null ? "{}" : JsonSerializer.Serialize(node, s_pipelineJson);
-
     private static string GetLo(string k, string d) => Environment.GetEnvironmentVariable(k) ?? d;
 
     private static string HostN() =>
@@ -203,13 +188,6 @@ public static class Program
         root["table_of_clients"] = na;
     }
 
-    private static bool VerboseFrameworkLogs()
-    {
-        var v = GetLo("DEMO_VERBOSE_FRAMEWORK_LOGS", "false").Trim();
-        return v.Equals("true", StringComparison.OrdinalIgnoreCase)
-               || v is "1" or "yes";
-    }
-
     public static async Task Main()
     {
         if (GetLo("DEMO_MODE", "pipeline").Equals("exercises", StringComparison.OrdinalIgnoreCase))
@@ -219,35 +197,7 @@ public static class Program
         }
 
         var builder = WebApplication.CreateBuilder();
-        var verboseFw = VerboseFrameworkLogs();
-        if (!verboseFw)
-        {
-            builder.Logging.SetMinimumLevel(LogLevel.Warning);
-            builder.Logging.AddFilter("Microsoft", LogLevel.Warning);
-            builder.Logging.AddFilter("Microsoft.AspNetCore", LogLevel.Warning);
-            builder.Logging.AddFilter("Microsoft.AspNetCore.Hosting.Diagnostics", LogLevel.Error);
-            builder.Logging.AddFilter("Microsoft.Hosting.Lifetime", LogLevel.Warning);
-            builder.Logging.AddFilter("System.Net.Http", LogLevel.Warning);
-            builder.Logging.AddFilter("System.Net.Http.HttpClient", LogLevel.Warning);
-            builder.Logging.AddFilter("OpenTelemetry", LogLevel.Warning);
-            builder.Logging.AddFilter("OpenTelemetry.Exporter", LogLevel.Error);
-            // Named HttpClient (OTLP) używa podkategorii *.LogicalHandler — wyłącz Info bez prefiksów:
-            builder.Logging.AddFilter(
-                (category, _, level) =>
-                {
-                    if (category is null)
-                        return true;
-                    if (category.Contains("OtlpTraceExporter", StringComparison.Ordinal)
-                        || category.Contains("OtlpMetricExporter", StringComparison.Ordinal))
-                        return level >= LogLevel.Warning;
-                    return true;
-                });
-        }
-        else
-        {
-            builder.Logging.AddFilter("Microsoft.AspNetCore", LogLevel.Warning);
-        }
-
+        builder.Logging.AddFilter("Microsoft.AspNetCore", LogLevel.Warning);
         builder.Services.AddHttpClient();
 
         var l = GetLo("DEMO_HTTP_ADDR", "0.0.0.0:8080");
@@ -404,7 +354,7 @@ public static class Program
         BumpCounter(root, cid);
 
         var nextIdx = FirstUnvisited(route);
-        var outJson = NodeToJsonString(root);
+        var outJson = root.ToJsonString(new JsonSerializerOptions { WriteIndented = false });
 
         if (nextIdx is null)
         {
