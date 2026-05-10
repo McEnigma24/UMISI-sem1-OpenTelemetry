@@ -11,6 +11,7 @@
 # Stub sender (jednorazowo): `docker compose run --rm sender`
 #
 services:
+
   jaeger:
     image: jaegertracing/all-in-one:latest
     ports:
@@ -134,8 +135,8 @@ services:
     depends_on:
       otel:
         condition: service_started
-      client-cpp:
-        condition: service_started
+      # client-cpp:
+      #   condition: service_started
       client-rust:
         condition: service_started
       client-csharp:
