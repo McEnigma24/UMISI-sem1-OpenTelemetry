@@ -1,5 +1,8 @@
 /*
- * HTTP pipeline (C#). POST DEMO_HTTP_PATH — JSON z opcjonalnym ``route`` (pierwszy segment = gateway).
+ * HTTP pipeline (C#). POST DEMO_HTTP_PATH — JSON z ``route``.
+ *
+ * DEMO_VERBOSE_FRAMEWORK_LOGS — true/1/yes: więcej logów Microsoft/System.Net.Http/OpenTelemetry;
+ *   domyślnie (false) — tylko Warning+ dla frameworka (ciszej niż domyślne ASP.NET).
  */
 using System.Collections;
 using System.Collections.Generic;
@@ -24,7 +27,13 @@ namespace OtelDemo;
 public static class Program
 {
     private static readonly ActivitySource Act = new("demo_app", "1.0.0");
+    private static readonly JsonSerializerOptions s_pipelineJson =
+        new() { WriteIndented = false };
+
     private static void CsLine(string m) => Console.WriteLine($"{DateTime.Now:HH:mm:ss.fff} {m}");
+    private static string NodeToJsonString(JsonNode? node) =>
+        JsonSerializer.Serialize(node, s_pipelineJson);
+
     private static string GetLo(string k, string d) => Environment.GetEnvironmentVariable(k) ?? d;
 
     private static string HostN() =>
@@ -188,7 +197,12 @@ public static class Program
         root["table_of_clients"] = na;
     }
 
-    public static async Task Main()
+    private static bool VerboseFrameworkLogs()
+    {
+        var v = GetLo("DEMO_VERBOSE_FRAMEWORK_LOGS", "false").Trim();
+        return v.Equals("true", StringComparison.OrdinalIgnoreCase)
+               || v is "1" or "yes";
+    }
     {
         if (GetLo("DEMO_MODE", "pipeline").Equals("exercises", StringComparison.OrdinalIgnoreCase))
         {
@@ -197,7 +211,22 @@ public static class Program
         }
 
         var builder = WebApplication.CreateBuilder();
-        builder.Logging.AddFilter("Microsoft.AspNetCore", LogLevel.Warning);
+        if (!VerboseFrameworkLogs())
+        {
+            builder.Logging.SetMinimumLevel(LogLevel.Warning);
+            builder.Logging.AddFilter("Microsoft", LogLevel.Warning);
+            builder.Logging.AddFilter("Microsoft.AspNetCore", LogLevel.Warning);
+            builder.Logging.AddFilter("Microsoft.AspNetCore.Hosting.Diagnostics", LogLevel.Error);
+            builder.Logging.AddFilter("Microsoft.Hosting.Lifetime", LogLevel.Warning);
+            builder.Logging.AddFilter("System.Net.Http", LogLevel.Warning);
+            builder.Logging.AddFilter("System.Net.Http.HttpClient", LogLevel.Warning);
+            builder.Logging.AddFilter("OpenTelemetry", LogLevel.Warning);
+        }
+        else
+        {
+            builder.Logging.AddFilter("Microsoft.AspNetCore", LogLevel.Warning);
+        }
+
         builder.Services.AddHttpClient();
 
         var l = GetLo("DEMO_HTTP_ADDR", "0.0.0.0:8080");
@@ -354,7 +383,7 @@ public static class Program
         BumpCounter(root, cid);
 
         var nextIdx = FirstUnvisited(route);
-        var outJson = root.ToJsonString(new JsonSerializerOptions { WriteIndented = false });
+        var outJson = NodeToJsonString(root);
 
         if (nextIdx is null)
         {
