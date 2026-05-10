@@ -15,6 +15,8 @@ using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.Json.Serialization;
+using System.Text.Json.Serialization.Metadata;
 using Microsoft.Extensions.Logging;
 using OpenTelemetry;
 using OpenTelemetry.Exporter;
@@ -27,12 +29,16 @@ namespace OtelDemo;
 public static class Program
 {
     private static readonly ActivitySource Act = new("demo_app", "1.0.0");
-    private static readonly JsonSerializerOptions s_pipelineJson =
-        new() { WriteIndented = false };
+    private static readonly JsonSerializerOptions s_pipelineJson = new()
+    {
+        WriteIndented = false,
+        TypeInfoResolver = new DefaultJsonTypeInfoResolver(),
+    };
 
     private static void CsLine(string m) => Console.WriteLine($"{DateTime.Now:HH:mm:ss.fff} {m}");
+
     private static string NodeToJsonString(JsonNode? node) =>
-        JsonSerializer.Serialize(node, s_pipelineJson);
+        node is null ? "{}" : JsonSerializer.Serialize(node, s_pipelineJson);
 
     private static string GetLo(string k, string d) => Environment.GetEnvironmentVariable(k) ?? d;
 
@@ -203,6 +209,8 @@ public static class Program
         return v.Equals("true", StringComparison.OrdinalIgnoreCase)
                || v is "1" or "yes";
     }
+
+    public static async Task Main()
     {
         if (GetLo("DEMO_MODE", "pipeline").Equals("exercises", StringComparison.OrdinalIgnoreCase))
         {
@@ -211,7 +219,8 @@ public static class Program
         }
 
         var builder = WebApplication.CreateBuilder();
-        if (!VerboseFrameworkLogs())
+        var verboseFw = VerboseFrameworkLogs();
+        if (!verboseFw)
         {
             builder.Logging.SetMinimumLevel(LogLevel.Warning);
             builder.Logging.AddFilter("Microsoft", LogLevel.Warning);
@@ -221,6 +230,18 @@ public static class Program
             builder.Logging.AddFilter("System.Net.Http", LogLevel.Warning);
             builder.Logging.AddFilter("System.Net.Http.HttpClient", LogLevel.Warning);
             builder.Logging.AddFilter("OpenTelemetry", LogLevel.Warning);
+            builder.Logging.AddFilter("OpenTelemetry.Exporter", LogLevel.Error);
+            // Named HttpClient (OTLP) używa podkategorii *.LogicalHandler — wyłącz Info bez prefiksów:
+            builder.Logging.AddFilter(
+                (category, _, level) =>
+                {
+                    if (category is null)
+                        return true;
+                    if (category.Contains("OtlpTraceExporter", StringComparison.Ordinal)
+                        || category.Contains("OtlpMetricExporter", StringComparison.Ordinal))
+                        return level >= LogLevel.Warning;
+                    return true;
+                });
         }
         else
         {
