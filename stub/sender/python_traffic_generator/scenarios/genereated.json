@@ -1,0 +1,29 @@
+{
+  "defaults": {
+    "target_url": "http://gateway-python:8080/v1/pipeline",
+    "client_log": "/app/client_e2e.log",
+    "timeout_sec": 120
+  },
+  "groups": [
+    {
+      "name": "sequential_rotating",
+      "initial_delay_sec": 0,
+      "periodicity_sec": 2,
+      "waves": 2,
+      "send": {
+        "mode": "sequential",
+        "payload_files": ["example_route.json", "example_route.json"]
+      }
+    },
+    {
+      "name": "parallel_burst",
+      "initial_delay_sec": 1,
+      "periodicity_sec": 0,
+      "waves": 1,
+      "send": {
+        "mode": "parallel",
+        "payload_files": ["example_route.json", "example_route.json"]
+      }
+    }
+  ]
+}

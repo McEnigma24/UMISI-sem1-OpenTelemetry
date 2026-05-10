@@ -3,10 +3,10 @@
 # docker compose up
 
 docker compose up -d
-docker compose logs -f sender client-python client-rust client-csharp
+docker compose logs -f sender gateway-python client-rust client-csharp
 
 docker container prune -f
-
+docker compose down
 
 
 

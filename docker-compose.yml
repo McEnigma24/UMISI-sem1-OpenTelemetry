@@ -1,5 +1,5 @@
 #   docker compose logs -f otel          # trace’y z `debug` + eksport do Jaegera
-#   docker compose up --scale client-python=2
+#   docker compose up --scale gateway-python=2
 #   docker compose up otel               # sam Collector, klient ręcznie z hosta
 #
 # Obrazy: oficjalne (grafana/grafana, prom/prometheus, jaegertracing/all-in-one) — dobre wsparcie
@@ -7,8 +7,8 @@
 #
 # UI: Jaeger http://localhost:16686  |  Prometheus http://localhost:9090  |  Grafana http://localhost:3000 (admin/admin)
 #
-# HTTP pipeline: py → rust → cs (DEMO_NEXT_URL, port 8080 w sieci). Dla `scale: 1` na węzłach.
-# Stub sender (jednorazowo): `docker compose run --rm sender`
+# HTTP pipeline: niepusty JSON ``route`` + DEMO_PEER_* (mapa hopów). Z hosta tylko gateway: localhost:18080.
+# Stub sender: `docker compose run --rm sender` lub `DEMO_PAYLOAD_FILE` z przykładowym route.
 #
 services:
 
@@ -72,7 +72,9 @@ services:
   #     DEMO_HTTP_ADDR: 0.0.0.0:8080
   #     DEMO_HTTP_PATH: /v1/pipeline
   #     DEMO_CLIENT_ID: cpp
-  #     DEMO_NEXT_URL: http://client-csharp:8080/v1/pipeline
+  #     DEMO_PEER_PY: http://gateway-python:8080/v1/pipeline
+  #     DEMO_PEER_RS: http://client-rust:8080/v1/pipeline
+  #     DEMO_PEER_CS: http://client-csharp:8080/v1/pipeline
   #   depends_on:
   #     otel:
   #       condition: service_started
@@ -92,7 +94,9 @@ services:
       DEMO_HTTP_ADDR: 0.0.0.0:8080
       DEMO_HTTP_PATH: /v1/pipeline
       DEMO_CLIENT_ID: rs
-      DEMO_NEXT_URL: http://client-csharp:8080/v1/pipeline
+      DEMO_PEER_PY: http://gateway-python:8080/v1/pipeline
+      DEMO_PEER_RS: http://client-rust:8080/v1/pipeline
+      DEMO_PEER_CS: http://client-csharp:8080/v1/pipeline
     depends_on:
       otel:
         condition: service_started
@@ -110,13 +114,15 @@ services:
       DEMO_HTTP_ADDR: 0.0.0.0:8080
       DEMO_HTTP_PATH: /v1/pipeline
       DEMO_CLIENT_ID: cs
-      DEMO_NEXT_URL: ""
+      DEMO_PEER_PY: http://gateway-python:8080/v1/pipeline
+      DEMO_PEER_RS: http://client-rust:8080/v1/pipeline
+      DEMO_PEER_CS: http://client-csharp:8080/v1/pipeline
     depends_on:
       otel:
         condition: service_started
 
   # API gateway #
-  client-python:
+  gateway-python:
     build:
       context: ./clients/python
     image: client_python
@@ -131,7 +137,9 @@ services:
       DEMO_HTTP_ADDR: 0.0.0.0:8080
       DEMO_HTTP_PATH: /v1/pipeline
       DEMO_CLIENT_ID: py
-      DEMO_NEXT_URL: http://client-rust:8080/v1/pipeline
+      DEMO_PEER_PY: http://gateway-python:8080/v1/pipeline
+      DEMO_PEER_RS: http://client-rust:8080/v1/pipeline
+      DEMO_PEER_CS: http://client-csharp:8080/v1/pipeline
     depends_on:
       otel:
         condition: service_started
@@ -162,9 +170,12 @@ services:
       context: ./stub/sender/python_traffic_generator
     image: demo_sender
     environment:
-      DEMO_TARGET_URL: http://client-python:8080/v1/pipeline
+      DEMO_TARGET_URL: http://gateway-python:8080/v1/pipeline
+
+      # DEMO_PAYLOAD_FILE: /app/routes/1-scenario.json
+      DEMO_SCENARIO_FILE: /app/scenarios/1-scenario.json
     depends_on:
-      client-python:
+      gateway-python:
         condition: service_healthy
 
 
@@ -193,13 +204,13 @@ services:
 
 
 # Container umisi-sem1-opentelemetry-otel-1
-# Container umisi-sem1-opentelemetry-client-python-1
+# Container umisi-sem1-opentelemetry-gateway-python-1
 
 # Container names #
 # {nazwa_projektu}-{nazwa_usługi}-{numer_repliki}
 
 # umisi-sem1-opentelemetry - otel          - 1
-# umisi-sem1-opentelemetry - client-python - 1
+# umisi-sem1-opentelemetry - gateway-python - 1
 
 
   #   command:
