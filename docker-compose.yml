@@ -55,6 +55,27 @@ services:
       - prometheus
       - jaeger
 
+  # workers #
+  # client-cpp:
+  #   build:
+  #     context: ./clients/cpp
+  #   image: client_cpp
+  #   volumes:
+  #     - ./clients/cpp/build-docker:/app/build
+  #   environment:
+  #     OTEL_DEMO_TRACE_EXPORT: otlp
+  #     OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://otel:4318/v1/traces
+  #     OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: http://otel:4318/v1/metrics
+  #     OTEL_ENVIRONMENT: local
+  #     OTEL_DEMO_RESOURCE_TAG: lang-cpp
+  #     DEMO_HTTP_ADDR: 0.0.0.0:8080
+  #     DEMO_HTTP_PATH: /v1/pipeline
+  #     DEMO_CLIENT_ID: cpp
+  #     DEMO_NEXT_URL: http://client-csharp:8080/v1/pipeline
+  #   depends_on:
+  #     otel:
+  #       condition: service_started
+
   client-rust:
     build:
       context: ./clients/rust
@@ -72,44 +93,9 @@ services:
       DEMO_CLIENT_ID: rs
       DEMO_NEXT_URL: http://client-csharp:8080/v1/pipeline
     depends_on:
-      client-csharp:
-        condition: service_started
       otel:
         condition: service_started
 
-  client-python:
-    build:
-      context: ./clients/python
-    image: client_python
-    ports:
-      - "18080:8080"
-    environment:
-      OTEL_DEMO_TRACE_EXPORT: otlp
-      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://otel:4318/v1/traces
-      OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: http://otel:4318/v1/metrics
-      OTEL_ENVIRONMENT: local
-      OTEL_DEMO_RESOURCE_TAG: lang-python
-      DEMO_HTTP_ADDR: 0.0.0.0:8080
-      DEMO_HTTP_PATH: /v1/pipeline
-      DEMO_CLIENT_ID: py
-      DEMO_NEXT_URL: http://client-rust:8080/v1/pipeline
-    depends_on:
-      client-rust:
-        condition: service_started
-      otel:
-        condition: service_started
-    healthcheck:
-      test:
-        [
-          "CMD",
-          "python",
-          "-c",
-          "import socket; s=socket.create_connection(('127.0.0.1',8080),2); s.close()",
-        ]
-      interval: 2s
-      timeout: 3s
-      retries: 30
-      start_period: 60s
   client-csharp:
     build:
       context: ./clients/csharp
@@ -128,9 +114,51 @@ services:
       otel:
         condition: service_started
 
+  # API gateway #
+  client-python:
+    build:
+      context: ./clients/python
+    image: client_python
+    ports:
+      - "18080:8080"
+    environment:
+      OTEL_DEMO_TRACE_EXPORT: otlp
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://otel:4318/v1/traces
+      OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: http://otel:4318/v1/metrics
+      OTEL_ENVIRONMENT: local
+      OTEL_DEMO_RESOURCE_TAG: lang-python
+      DEMO_HTTP_ADDR: 0.0.0.0:8080
+      DEMO_HTTP_PATH: /v1/pipeline
+      DEMO_CLIENT_ID: py
+      DEMO_NEXT_URL: http://client-rust:8080/v1/pipeline
+    depends_on:
+      otel:
+        condition: service_started
+      client-cpp:
+        condition: service_started
+      client-rust:
+        condition: service_started
+      client-csharp:
+        condition: service_started
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import socket; s=socket.create_connection(('127.0.0.1',8080),2); s.close()",
+        ]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 60s
+
+
+
+  # Traffic Generator #
   sender:
     build:
-      context: ./stub/sender/python_send_starting_msg
+      context: ./stub/sender/python_traffic_generator
     image: demo_sender
     environment:
       DEMO_TARGET_URL: http://client-python:8080/v1/pipeline
