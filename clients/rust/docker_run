@@ -1,9 +1,5 @@
-#!/usr/bin/env bash
-# Obraz runner (pakuje binarkę z ./docker-target/release z dysku) i uruchomienie (jak clients/cpp/docker_run).
-set -eu
-cd "$(dirname "$0")"
-
 img_name="runner"
+
 
 docker build --target "$img_name" -t "client_rust-$img_name" .
 

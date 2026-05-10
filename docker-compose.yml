@@ -8,7 +8,7 @@
 # UI: Jaeger http://localhost:16686  |  Prometheus http://localhost:9090  |  Grafana http://localhost:3000 (admin/admin)
 #
 # HTTP pipeline: niepusty JSON ``route`` + DEMO_PEER_* (mapa hopów). Z hosta tylko gateway: localhost:18080.
-# Stub sender: `docker compose run --rm sender` lub `DEMO_PAYLOAD_FILE` z przykładowym route.
+# Stub traffic_generator: `docker compose run --rm traffic_generator` lub `DEMO_PAYLOAD_FILE` z przykładowym route.
 #
 services:
 
@@ -167,10 +167,10 @@ services:
 
 
   # Traffic Generator #
-  sender:
+  traffic_generator:
     build:
       context: ./stub/sender/python_traffic_generator
-    image: demo_sender
+    image: traffic_generator
     environment:
       DEMO_TARGET_URL: http://gateway-python:8080/v1/pipeline
 

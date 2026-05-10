@@ -5,7 +5,7 @@
 #   • runner — tylko binarka z hosta (po ./docker_build): COPY ./docker-target/release/client_rust
 #
 # Workflow:
-#   cd clients/rust && ./docker_build    # kompilacja → docker-target/ na hoście
+#   cd clients/rust && ./docker_build    # kompilacja (uruchom ./ a nie „. docker_build”)
 #   cd clients/rust && ./docker_run      # obraz runner + uruchomienie (albo: docker compose build)
 
 # ==========================================
@@ -30,8 +30,8 @@ ENV CARGO_TARGET_DIR=/workspace/docker-target
 # 3. BUILDER — źródła wyłącznie z volumenu (patrz docker_build)
 # ==========================================
 FROM dev-env AS builder
-RUN chmod +x Docker_start.sh
-CMD ["/bin/sh", "-c", "sleep 2 && exec ./Docker_start.sh"]
+# Skrypt jest tylko na volumenie /workspace — wywołanie przez bash (bez chmod +x na bind-mount).
+CMD ["/bin/sh", "-c", "sleep 2 && exec /usr/bin/bash /workspace/Docker_start.sh"]
 
 # ==========================================
 # 4. RUNNER — artefakt z ./docker-target na hoście (jak cpp: ./build/cpp_client.exe)

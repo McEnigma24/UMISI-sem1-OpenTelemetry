@@ -307,6 +307,23 @@ def _resolve_files(base_dir: Path, paths: list[Any]) -> list[Path]:
     return out
 
 
+async def _should_stop_global(
+    state: RunState,
+    dur_limit_sec: float | None,
+    req_cap: int | None,
+) -> bool:
+    """Po RESP: signal, limit czasu globalnego, limit liczby żądań."""
+    if state.stop.is_set():
+        return True
+    if dur_limit_sec is not None and time.perf_counter() - state.started_at >= dur_limit_sec:
+        return True
+    if req_cap is not None:
+        async with state.lock:
+            if state.total_requests >= req_cap:
+                return True
+    return False
+
+
 async def group_runner(
     group: dict[str, Any],
     base_dir: Path,
@@ -362,26 +379,24 @@ async def group_runner(
     await asyncio.sleep(initial)
 
     rep_i = 0
-    while not state.stop.is_set():
+    while True:
+        if await _should_stop_global(state, dur_limit_sec, req_cap):
+            break
         if repetitions_limit is not None and rep_i >= repetitions_limit:
             _line(f"[{name}] done after {repetitions_limit} repetition(s)")
             break
 
-        if dur_limit_sec is not None and time.perf_counter() - state.started_at >= dur_limit_sec:
-            break
-        if req_cap is not None:
-            async with state.lock:
-                if state.total_requests >= req_cap:
-                    break
-
         _line(f"[{name}] repetition {rep_i + 1} begin")
 
+        wave_aborted = False
         if mode == "sequential":
             for fi, fp in enumerate(files):
                 if state.stop.is_set():
+                    wave_aborted = True
                     break
                 async with state.lock:
                     if req_cap is not None and state.total_requests >= req_cap:
+                        wave_aborted = True
                         break
                 payload = await asyncio.to_thread(_load_payload_file, fp)
                 detail = f"g={name} rep={rep_i} seq={fi} file={fp.name}"
@@ -391,6 +406,9 @@ async def group_runner(
                 async with state.lock:
                     state.total_requests += 1
                 _line(f"[{name}] {detail} -> {msg} ({dur_ms:.1f} ms)")
+                if await _should_stop_global(state, dur_limit_sec, req_cap):
+                    wave_aborted = True
+                    break
         else:
 
             async def one_file(fp: Path, seq: int) -> None:
@@ -404,10 +422,19 @@ async def group_runner(
                 _line(f"[{name}] {detail} -> {msg} ({dur_ms:.1f} ms)")
 
             await asyncio.gather(*[one_file(fp, j) for j, fp in enumerate(files)])
+            if await _should_stop_global(state, dur_limit_sec, req_cap):
+                wave_aborted = True
+
+        if wave_aborted:
+            break
 
         rep_i += 1
 
-        if state.stop.is_set():
+        if repetitions_limit is not None and rep_i >= repetitions_limit:
+            _line(f"[{name}] done after {repetitions_limit} repetition(s)")
+            break
+
+        if await _should_stop_global(state, dur_limit_sec, req_cap):
             break
 
         if periodicity > 0:

@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::env;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::body::Bytes;
 use axum::extract::State;
@@ -13,6 +13,7 @@ use axum::response::IntoResponse;
 use axum::response::Response;
 use axum::routing::post;
 use axum::Router;
+use opentelemetry::metrics::{Counter, Histogram};
 use opentelemetry::global;
 use opentelemetry::trace::FutureExt;
 use opentelemetry::trace::TraceContextExt;
@@ -22,9 +23,11 @@ use opentelemetry::InstrumentationScope;
 use opentelemetry::KeyValue;
 use opentelemetry_http::HeaderExtractor;
 use opentelemetry_http::HeaderInjector;
+use opentelemetry_otlp::MetricExporter;
 use opentelemetry_otlp::Protocol;
 use opentelemetry_otlp::SpanExporter;
 use opentelemetry_otlp::WithExportConfig;
+use opentelemetry_sdk::metrics::SdkMeterProvider;
 use opentelemetry_sdk::trace::SdkTracerProvider;
 use opentelemetry_sdk::Resource;
 use serde::Deserialize;
@@ -67,6 +70,35 @@ struct St {
     path: String,
     peers: HashMap<String, String>,
     max_proc: f64,
+    hop_hist: Histogram<f64>,
+    msg_counter: Counter<u64>,
+}
+
+/// Nagrywa czas hopu (ms) przy każdym wyjściu z obsługi trasy — jak `finally` w Pythonie.
+struct HopDurationGuard {
+    t0: Instant,
+    hop_hist: Histogram<f64>,
+    client_id: String,
+}
+
+impl HopDurationGuard {
+    fn new(hop_hist: Histogram<f64>, client_id: String) -> Self {
+        Self {
+            t0: Instant::now(),
+            hop_hist,
+            client_id,
+        }
+    }
+}
+
+impl Drop for HopDurationGuard {
+    fn drop(&mut self) {
+        let ms = self.t0.elapsed().as_secs_f64() * 1000.0;
+        self.hop_hist.record(
+            ms,
+            &[KeyValue::new("client_id", self.client_id.as_str())],
+        );
+    }
 }
 
 fn rs_line(s: &str) {
@@ -106,6 +138,33 @@ fn resource() -> Resource {
         }
     }
     b.build()
+}
+
+fn metrics_otlp_endpoint() -> String {
+    if let Ok(e) = env::var("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT") {
+        let t = e.trim();
+        if !t.is_empty() {
+            return t.to_string();
+        }
+    }
+    let traces = env::var("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
+        .unwrap_or_else(|_| "http://127.0.0.1:4318/v1/traces".to_string());
+    traces.replace("/v1/traces", "/v1/metrics")
+}
+
+fn init_metrics_provider() -> SdkMeterProvider {
+    let e = metrics_otlp_endpoint();
+    let ex = MetricExporter::builder()
+        .with_http()
+        .with_protocol(Protocol::HttpJson)
+        .with_endpoint(e)
+        .with_timeout(Duration::from_secs(5))
+        .build()
+        .expect("otlp metrics exporter");
+    SdkMeterProvider::builder()
+        .with_resource(resource())
+        .with_periodic_exporter(ex)
+        .build()
 }
 
 fn init_otel() -> SdkTracerProvider {
@@ -220,7 +279,7 @@ async fn pipeline(
     let parent: Context =
         global::get_text_map_propagator(|p| p.extract(&HeaderExtractor(&headers)));
 
-    let mut m: PipelineMsg = match serde_json::from_slice(&body) {
+    let m: PipelineMsg = match serde_json::from_slice(&body) {
         Ok(x) => x,
         Err(e) => {
             return (StatusCode::BAD_REQUEST, e.to_string()).into_response();
@@ -232,6 +291,14 @@ async fn pipeline(
         String::from_utf8_lossy(&body)
     ));
 
+    route_mode(&st, &parent, m).await
+}
+
+async fn route_mode(st: &St, parent: &Context, mut m: PipelineMsg) -> Response {
+    use axum::body::Body;
+
+    let _hop_duration = HopDurationGuard::new(st.hop_hist.clone(), st.id.clone());
+
     if m.route.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
@@ -239,12 +306,6 @@ async fn pipeline(
         )
             .into_response();
     }
-
-    route_mode(&st, &parent, m).await
-}
-
-async fn route_mode(st: &St, parent: &Context, mut m: PipelineMsg) -> Response {
-    use axum::body::Body;
 
     let t = global::tracer_with_scope(
         InstrumentationScope::builder("demo_app")
@@ -344,6 +405,10 @@ async fn route_mode(st: &St, parent: &Context, mut m: PipelineMsg) -> Response {
                 return (StatusCode::BAD_GATEWAY, e).into_response();
             }
         };
+        st.msg_counter.add(
+            1,
+            &[KeyValue::new("client_id", st.id.as_str())],
+        );
         return Response::builder()
             .status(status)
             .header("content-type", "application/json")
@@ -361,6 +426,10 @@ async fn route_mode(st: &St, parent: &Context, mut m: PipelineMsg) -> Response {
         "[{}] respond (terminal route): {out}",
         st.id
     ));
+    st.msg_counter.add(
+        1,
+        &[KeyValue::new("client_id", st.id.as_str())],
+    );
     Response::builder()
         .status(StatusCode::OK)
         .header("content-type", "application/json")
@@ -380,6 +449,27 @@ async fn main() {
     let prov = init_otel();
     let keep = prov.clone();
     global::set_tracer_provider(prov);
+    let _meter_prov = if use_otlp() {
+        let mp = init_metrics_provider();
+        global::set_meter_provider(mp.clone());
+        Some(mp)
+    } else {
+        None
+    };
+    let meter = global::meter_with_scope(
+        InstrumentationScope::builder("demo_app")
+            .with_version("1.0.0")
+            .build(),
+    );
+    let hop_hist = meter
+        .f64_histogram("demo.pipeline.hop.duration_ms")
+        .with_unit("ms")
+        .with_description("Czas przetworzenia i ewent. forward jednego hopy")
+        .build();
+    let msg_counter = meter
+        .u64_counter("demo.pipeline.messages")
+        .with_description("Liczba przetworzonych wiadomości w węźle")
+        .build();
     let peers = match load_peer_map() {
         Ok(m) => m,
         Err(e) => {
@@ -392,6 +482,8 @@ async fn main() {
         path: env::var("DEMO_HTTP_PATH").unwrap_or_else(|_| "/v1/pipeline".to_string()),
         peers,
         max_proc: max_processing_sec(),
+        hop_hist,
+        msg_counter,
     });
     let a: SocketAddr = env::var("DEMO_HTTP_ADDR")
         .unwrap_or_else(|_| "0.0.0.0:8080".to_string())
