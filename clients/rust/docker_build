@@ -1,3 +1,16 @@
-docker build -t client_rust .
+#!/usr/bin/env bash
+# Kompilacja w kontenerze z volumenem bieżącego katalogu → /workspace (jak clients/cpp/docker_build).
+set -eu
+cd "$(dirname "$0")"
+
+img_name="builder"
+
+docker build --target "$img_name" -t "client_rust-$img_name" .
 
 docker image prune -f
+
+docker run --rm -it \
+  -v "$(pwd):/workspace" \
+  "client_rust-$img_name"
+
+docker container prune -f

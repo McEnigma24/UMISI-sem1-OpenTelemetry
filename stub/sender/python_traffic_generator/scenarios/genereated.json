@@ -8,21 +8,21 @@
     {
       "name": "sequential_rotating",
       "initial_delay_sec": 0,
-      "periodicity_sec": 2,
-      "waves": 2,
+      "periodicity": 2,
+      "repetitions": 2,
       "send": {
         "mode": "sequential",
-        "payload_files": ["example_route.json", "example_route.json"]
+        "payload_files": ["1-route.json", "1-route.json"]
       }
     },
     {
       "name": "parallel_burst",
       "initial_delay_sec": 1,
-      "periodicity_sec": 0,
-      "waves": 1,
+      "periodicity": 0,
+      "repetitions": 1,
       "send": {
         "mode": "parallel",
-        "payload_files": ["example_route.json", "example_route.json"]
+        "payload_files": ["1-route.json", "1-route.json"]
       }
     }
   ]

@@ -7,10 +7,13 @@ Tryb 1 — pojedynczy request (domyślny gdy brak DEMO_SCENARIO_FILE):
 
 Tryb 2 — scenariusz (meta-level):
   DEMO_SCENARIO_FILE lub pierwszy argument argv — JSON z ``groups[]``:
-    - initial_delay_sec, periodicity_sec (sekundy między falami w grupie)
-    - waves — ile fal wykonać (null lub brak = w nieskończoność, dopóki globalny stop)
-    - send.mode: sequential | parallel (w jednej fali: kolejno vs równolegle)
-    - send.payload_files — lista plików z payloadem API (względem katalogu scenariusza)
+    - initial_delay_sec
+    - periodicity — sekundy przerwy między kolejnymi seriami requestów (po każdej serii)
+    - repetitions — ile razy powtórzyć całą serię (send.payload_files); null lub brak = bez końca,
+      dopóki globalny stop
+    - send.mode: sequential | parallel (w jednej serii: kolejno vs równolegle)
+    - send.payload_files — lista payloadów: pojedyncza nazwa pliku (bez „/”) szuka w ``routes/``
+      obok katalogu ``scenarios/``; ścieżka z podkatalogiem jest względna do katalogu pliku scenariusza
   defaults: target_url, client_log, timeout_sec
   stop (opcjonalnie): after_duration_sec / duration_sec, after_total_requests / total_requests
     — jeśli podane, uruchamiany jest monitor kończący wszystkie grupy.
@@ -286,14 +289,21 @@ async def global_monitor(
 
 
 def _resolve_files(base_dir: Path, paths: list[Any]) -> list[Path]:
+    """Ścieżki względne z „/” — od katalogu scenariusza; sama nazwa pliku — od ``routes/`` obok ``scenarios``."""
+    routes_dir = (base_dir.parent / "routes").resolve()
     out: list[Path] = []
     for p in paths:
         if not isinstance(p, str) or not p.strip():
             raise ValueError("payload_files entries must be non-empty strings")
-        path = Path(p.strip())
-        if not path.is_absolute():
-            path = (base_dir / path).resolve()
-        out.append(path)
+        s = p.strip()
+        path = Path(s)
+        if path.is_absolute():
+            out.append(path.resolve())
+            continue
+        if "/" not in s and "\\" not in s:
+            out.append((routes_dir / s).resolve())
+        else:
+            out.append((base_dir / path).resolve())
     return out
 
 
@@ -313,10 +323,10 @@ async def group_runner(
     log_path = str(group.get("client_log") or "").strip() or default_log
 
     initial = float(group.get("initial_delay_sec") or 0)
-    periodicity = float(group.get("periodicity_sec") or group.get("every_sec") or 0)
-    waves_limit = group.get("waves")
-    if waves_limit is not None:
-        waves_limit = int(waves_limit)
+    periodicity = float(group.get("periodicity") or 0)
+    repetitions_limit = group.get("repetitions")
+    if repetitions_limit is not None:
+        repetitions_limit = int(repetitions_limit)
 
     send = group.get("send")
     if not isinstance(send, dict):
@@ -346,15 +356,15 @@ async def group_runner(
 
     _line(
         f"[{name}] start initial_delay={initial}s periodicity={periodicity}s "
-        f"waves={waves_limit!r} mode={mode} files={[str(f) for f in files]}"
+        f"repetitions={repetitions_limit!r} mode={mode} files={[str(f) for f in files]}"
     )
 
     await asyncio.sleep(initial)
 
-    wave_i = 0
+    rep_i = 0
     while not state.stop.is_set():
-        if waves_limit is not None and wave_i >= waves_limit:
-            _line(f"[{name}] done after {waves_limit} wave(s)")
+        if repetitions_limit is not None and rep_i >= repetitions_limit:
+            _line(f"[{name}] done after {repetitions_limit} repetition(s)")
             break
 
         if dur_limit_sec is not None and time.perf_counter() - state.started_at >= dur_limit_sec:
@@ -364,7 +374,7 @@ async def group_runner(
                 if state.total_requests >= req_cap:
                     break
 
-        _line(f"[{name}] wave {wave_i + 1} begin")
+        _line(f"[{name}] repetition {rep_i + 1} begin")
 
         if mode == "sequential":
             for fi, fp in enumerate(files):
@@ -374,7 +384,7 @@ async def group_runner(
                     if req_cap is not None and state.total_requests >= req_cap:
                         break
                 payload = await asyncio.to_thread(_load_payload_file, fp)
-                detail = f"g={name} wave={wave_i} seq={fi} file={fp.name}"
+                detail = f"g={name} rep={rep_i} seq={fi} file={fp.name}"
                 code, dur_ms, msg = await asyncio.to_thread(
                     _sync_post, url, payload, timeout_sec, log_path, detail
                 )
@@ -385,7 +395,7 @@ async def group_runner(
 
             async def one_file(fp: Path, seq: int) -> None:
                 payload = await asyncio.to_thread(_load_payload_file, fp)
-                detail = f"g={name} wave={wave_i} par={seq} file={fp.name}"
+                detail = f"g={name} rep={rep_i} par={seq} file={fp.name}"
                 _code, dur_ms, msg = await asyncio.to_thread(
                     _sync_post, url, payload, timeout_sec, log_path, detail
                 )
@@ -395,7 +405,7 @@ async def group_runner(
 
             await asyncio.gather(*[one_file(fp, j) for j, fp in enumerate(files)])
 
-        wave_i += 1
+        rep_i += 1
 
         if state.stop.is_set():
             break
