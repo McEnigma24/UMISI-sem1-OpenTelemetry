@@ -31,18 +31,18 @@ from typing import Any
 from urllib import error as urlerror
 from urllib import request as urlrequest
 
-from opentelemetry import context as otel_context
 from opentelemetry import metrics, trace
 from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry import context as otel_context
 from opentelemetry.propagate import extract, inject, set_global_textmap
+from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.sampling import ALWAYS_ON
-from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
 _TRACER: trace.Tracer | None = None
 _METER: metrics.Meter | None = None
@@ -482,23 +482,8 @@ def run_server() -> None:
 
 
 def main() -> int:
-    if os.environ.get("DEMO_MODE", "pipeline").lower() == "exercises":
-        return _main_legacy()
     run_server()
     return 0
-
-
-def _main_legacy() -> int:
-    py_line("DEMO_MODE=exercises: legacy demo (skrót). Pełne ćwiczenia OpenTelemetry: historia gita / wcześniejsza wersja pliku.")
-    p = _init_telemetry()
-    t = trace.get_tracer("gateway_python", "1.0.0")
-    with t.start_as_current_span("legacy_demo_outlined"):
-        py_line("OpenTelemetry: legacy run (użyj DEMO_MODE=pipeline dla łańcucha HTTP).")
-    pr = trace.get_tracer_provider()
-    if hasattr(pr, "force_flush"):
-        pr.force_flush(timeout_millis=10_000)  # type: ignore[union-attr]
-    return 0
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

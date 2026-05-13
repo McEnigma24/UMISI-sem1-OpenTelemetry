@@ -175,7 +175,8 @@ services:
       DEMO_TARGET_URL: http://gateway-python:8080/v1/pipeline
 
       # DEMO_PAYLOAD_FILE: /app/routes/1-scenario.json
-      DEMO_SCENARIO_FILE: /app/scenarios/1-scenario.json
+      DEMO_SCENARIO_FILE: /app/scenarios/1-scenario-sequential.json
+      # DEMO_SCENARIO_FILE: /app/scenarios/2-scenario-parallel.json
     depends_on:
       gateway-python:
         condition: service_healthy
