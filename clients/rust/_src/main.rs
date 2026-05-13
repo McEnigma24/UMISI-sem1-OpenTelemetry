@@ -1,4 +1,6 @@
 //! HTTP pipeline (Rust) — W3C propagate, forward, opcjonalna trasa `route` w JSON.
+//! Segment: `processing_time` (legacy) albo niepusta `processing_steps`: `[{ "activity", "time" }, …]`
+//! (spany `pipeline.processing` + podspany wg `activity`, jeden trace).
 use std::collections::HashMap;
 use std::env;
 use std::net::SocketAddr;
@@ -18,6 +20,7 @@ use opentelemetry::global;
 use opentelemetry::trace::FutureExt;
 use opentelemetry::trace::TraceContextExt;
 use opentelemetry::trace::Tracer;
+use opentelemetry::trace::Span;
 use opentelemetry::Context;
 use opentelemetry::InstrumentationScope;
 use opentelemetry::KeyValue;
@@ -28,6 +31,7 @@ use opentelemetry_otlp::Protocol;
 use opentelemetry_otlp::SpanExporter;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::metrics::SdkMeterProvider;
+use opentelemetry_sdk::propagation::TraceContextPropagator;
 use opentelemetry_sdk::trace::SdkTracerProvider;
 use opentelemetry_sdk::Resource;
 use serde::Deserialize;
@@ -36,12 +40,21 @@ use tokio::net::TcpListener;
 use uuid::Uuid;
 
 #[derive(Deserialize, Serialize, Clone, Debug, Default)]
+struct ProcessingStep {
+    #[serde(default)]
+    activity: String,
+    time: String,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, Default)]
 struct RouteSeg {
     id: String,
     #[serde(default)]
     visited: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     processing_time: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    processing_steps: Option<Vec<ProcessingStep>>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
@@ -94,10 +107,8 @@ impl HopDurationGuard {
 impl Drop for HopDurationGuard {
     fn drop(&mut self) {
         let ms = self.t0.elapsed().as_secs_f64() * 1000.0;
-        self.hop_hist.record(
-            ms,
-            &[KeyValue::new("client_id", self.client_id.as_str())],
-        );
+        let cid = self.client_id.clone();
+        self.hop_hist.record(ms, &[KeyValue::new("client_id", cid)]);
     }
 }
 
@@ -124,7 +135,7 @@ fn resource() -> Resource {
         .unwrap_or_else(|_| "local".to_string());
     let h = env::var("HOSTNAME").unwrap_or_else(|_| "unknown".to_string());
     let mut b = Resource::builder_empty()
-        .with_service_name("demo_app")
+        .with_service_name("worker_rust")
         .with_attribute(KeyValue::new("service.version", "1.0.0"))
         .with_attribute(KeyValue::new("service.instance.id", iid))
         .with_attribute(KeyValue::new("deployment.environment", d))
@@ -254,6 +265,53 @@ fn parse_processing_time(s: &Option<String>, cap: f64) -> Result<f64, String> {
     Ok(sec.min(cap))
 }
 
+fn parse_processing_steps(seg: &RouteSeg, cap: f64) -> Result<Option<Vec<(String, f64)>>, String> {
+    let steps = match &seg.processing_steps {
+        Some(s) if !s.is_empty() => s,
+        _ => return Ok(None),
+    };
+    let mut v = Vec::new();
+    for (i, st) in steps.iter().enumerate() {
+        let sec = parse_processing_time(&Some(st.time.clone()), cap)?;
+        let act = {
+            let t = st.activity.trim();
+            if t.is_empty() {
+                format!("step_{i}")
+            } else {
+                st.activity.clone()
+            }
+        };
+        v.push((act, sec));
+    }
+    Ok(Some(v))
+}
+
+fn span_name_for_activity(act: &str) -> String {
+    let t = act.trim();
+    if t.is_empty() {
+        return "pipeline.processing_step".to_string();
+    }
+    t.chars().take(256).collect()
+}
+
+enum WorkPlan {
+    Steps(Vec<(String, f64)>),
+    Legacy(f64),
+    None,
+}
+
+fn work_plan_for_segment(seg: &RouteSeg, cap: f64) -> Result<WorkPlan, String> {
+    if let Some(parsed) = parse_processing_steps(seg, cap)? {
+        return Ok(WorkPlan::Steps(parsed));
+    }
+    let dur = parse_processing_time(&seg.processing_time, cap)?;
+    if dur > 0.0 {
+        Ok(WorkPlan::Legacy(dur))
+    } else {
+        Ok(WorkPlan::None)
+    }
+}
+
 fn first_unvisited(route: &[RouteSeg]) -> Option<usize> {
     route.iter().position(|r| !r.visited)
 }
@@ -308,7 +366,7 @@ async fn route_mode(st: &St, parent: &Context, mut m: PipelineMsg) -> Response {
     }
 
     let t = global::tracer_with_scope(
-        InstrumentationScope::builder("demo_app")
+        InstrumentationScope::builder("worker_rust")
             .with_version("1.0.0")
             .build(),
     );
@@ -330,22 +388,56 @@ async fn route_mode(st: &St, parent: &Context, mut m: PipelineMsg) -> Response {
         )
             .into_response();
     }
-    let dur = match parse_processing_time(&m.route[idx].processing_time, st.max_proc) {
-        Ok(d) => d,
+    let plan = match work_plan_for_segment(&m.route[idx], st.max_proc) {
+        Ok(p) => p,
         Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
     };
 
     let hop = t.start_with_context("pipeline.hop", parent);
     let hop_cx = parent.clone().with_span(hop);
 
-    if dur > 0.0 {
-        let sw = t.start_with_context("pipeline.simulated_work", &hop_cx);
-        let sw_cx = hop_cx.clone().with_span(sw);
-        let sl = async {
-            tokio::time::sleep(Duration::from_secs_f64(dur)).await;
+    match &plan {
+        WorkPlan::Steps(steps) => {
+            let total: f64 = steps.iter().map(|(_, s)| *s).sum();
+            let mut proc = t.start_with_context("pipeline.processing", &hop_cx);
+            proc.set_attribute(KeyValue::new("demo.processing.mode", "steps"));
+            proc.set_attribute(KeyValue::new(
+                "demo.step_count",
+                steps.len() as i64,
+            ));
+            proc.set_attribute(KeyValue::new("demo.simulated_processing_sec", total));
+            let proc_cx = hop_cx.clone().with_span(proc);
+            for (i, (act, sec)) in steps.iter().enumerate() {
+                let name = span_name_for_activity(act);
+                let mut step = t.start_with_context(name, &proc_cx);
+                step.set_attribute(KeyValue::new("demo.activity", act.clone()));
+                step.set_attribute(KeyValue::new("demo.sleep_sec", *sec));
+                step.set_attribute(KeyValue::new("demo.step_index", i as i64));
+                let step_cx = proc_cx.clone().with_span(step);
+                if *sec > 0.0 {
+                    let sl = async {
+                        tokio::time::sleep(Duration::from_secs_f64(*sec)).await;
+                    }
+                    .with_context(step_cx);
+                    sl.await;
+                }
+            }
         }
-        .with_context(sw_cx);
-        sl.await;
+        WorkPlan::Legacy(dur) => {
+            let mut proc = t.start_with_context("pipeline.processing", &hop_cx);
+            proc.set_attribute(KeyValue::new("demo.processing.mode", "single"));
+            proc.set_attribute(KeyValue::new("demo.simulated_processing_sec", *dur));
+            let proc_cx = hop_cx.clone().with_span(proc);
+            let mut sw = t.start_with_context("pipeline.simulated_work", &proc_cx);
+            sw.set_attribute(KeyValue::new("demo.sleep_sec", *dur));
+            let sw_cx = proc_cx.clone().with_span(sw);
+            let sl = async {
+                tokio::time::sleep(Duration::from_secs_f64(*dur)).await;
+            }
+            .with_context(sw_cx);
+            sl.await;
+        }
+        WorkPlan::None => {}
     }
 
     m.route[idx].visited = true;
@@ -405,10 +497,9 @@ async fn route_mode(st: &St, parent: &Context, mut m: PipelineMsg) -> Response {
                 return (StatusCode::BAD_GATEWAY, e).into_response();
             }
         };
-        st.msg_counter.add(
-            1,
-            &[KeyValue::new("client_id", st.id.as_str())],
-        );
+        let cid = st.id.clone();
+        st.msg_counter
+            .add(1, &[KeyValue::new("client_id", cid)]);
         return Response::builder()
             .status(status)
             .header("content-type", "application/json")
@@ -426,10 +517,9 @@ async fn route_mode(st: &St, parent: &Context, mut m: PipelineMsg) -> Response {
         "[{}] respond (terminal route): {out}",
         st.id
     ));
-    st.msg_counter.add(
-        1,
-        &[KeyValue::new("client_id", st.id.as_str())],
-    );
+    let cid = st.id.clone();
+    st.msg_counter
+        .add(1, &[KeyValue::new("client_id", cid)]);
     Response::builder()
         .status(StatusCode::OK)
         .header("content-type", "application/json")
@@ -446,6 +536,9 @@ async fn main() {
         rs_line("DEMO_MODE=exercises — użyj DEMO_MODE=pipeline.");
         return;
     }
+    // Bez tego `extract`/`inject` używają propagatora „noop” — każdy hop ma nowy trace_id
+    // zamiast kontynuacji łańcucha z gatewaya (W3C traceparent).
+    global::set_text_map_propagator(TraceContextPropagator::new());
     let prov = init_otel();
     let keep = prov.clone();
     global::set_tracer_provider(prov);
@@ -457,7 +550,7 @@ async fn main() {
         None
     };
     let meter = global::meter_with_scope(
-        InstrumentationScope::builder("demo_app")
+        InstrumentationScope::builder("worker_rust")
             .with_version("1.0.0")
             .build(),
     );

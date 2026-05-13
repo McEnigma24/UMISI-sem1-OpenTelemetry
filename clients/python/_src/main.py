@@ -4,8 +4,10 @@ Pipeline HTTP: POST /v1/pipeline (JSON).
 
 Payload musi zawierać niepustą listę ``route`` (pierwszy segment = gateway, np. ``py``):
   Każdy węzeł obsługuje pierwszy nieodwiedzony segment z ``id`` == DEMO_CLIENT_ID,
-  symuluje ``processing_time``, oznacza visited, aktualizuje counter/table/visit_log,
-  forward do następnego id wg mapy DEMO_PEER_* / DEMO_PEER_MAP.
+  symuluje pracę albo pojedynczym ``processing_time`` (np. ``0.5s`` / ``100ms``),
+  albo listą ``processing_steps``: ``[{"activity": "…", "time": "0.5s"}, …]``
+  (wspólny span ``pipeline.processing``, podspany o nazwie ``activity`` — jeden traceId).
+  Oznacza visited, aktualizuje counter/table/visit_log, forward wg DEMO_PEER_* / DEMO_PEER_MAP.
 
 OTLP: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT, opcj. metryki.
 
@@ -33,13 +35,14 @@ from opentelemetry import context as otel_context
 from opentelemetry import metrics, trace
 from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
-from opentelemetry.propagate import extract, inject
+from opentelemetry.propagate import extract, inject, set_global_textmap
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.sampling import ALWAYS_ON
+from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
 _TRACER: trace.Tracer | None = None
 _METER: metrics.Meter | None = None
@@ -59,7 +62,7 @@ def _build_resource() -> Resource:
     tag = os.environ.get("OTEL_DEMO_RESOURCE_TAG", "").strip()
     host = socket.gethostname()
     attrs: dict = {
-        "service.name": "demo_app",
+        "service.name": "gateway_python",
         "service.version": "1.0.0",
         "service.instance.id": instance_id,
         "deployment.environment": env,
@@ -98,6 +101,8 @@ def _use_otlp_http() -> bool:
 
 def _init_telemetry() -> TracerProvider:
     global _TRACER, _METER
+    # Jawny W3C tracecontext — spójnie z workerami (Rust); bez tego zależność od domyślnego OTEL_PROPAGATORS.
+    set_global_textmap(TraceContextTextMapPropagator())
     resource = _build_resource()
     if _use_otlp_http():
         texp = OTLPSpanExporter(endpoint=_otlp_traces_ep(), timeout=5)
@@ -117,8 +122,8 @@ def _init_telemetry() -> TracerProvider:
         mp = MeterProvider(resource=resource)
         metrics.set_meter_provider(mp)
 
-    _TRACER = trace.get_tracer("demo_app", "1.0.0")
-    _METER = metrics.get_meter("demo_app", "1.0.0")
+    _TRACER = trace.get_tracer("gateway_python", "1.0.0")
+    _METER = metrics.get_meter("gateway_python", "1.0.0")
     return provider  # type: ignore[return-value]
 
 
@@ -179,6 +184,33 @@ def _parse_processing_time(v: Any) -> float:
     if sec > max_sec:
         sec = max_sec
     return sec
+
+
+def _span_name_for_activity(activity: str, index: int) -> str:
+    a = (activity or "").strip()
+    if not a:
+        return "pipeline.processing_step"
+    return a[:256]
+
+
+def _parse_processing_steps(seg: dict[str, Any]) -> list[tuple[str, float]] | None:
+    """Jeśli ``processing_steps`` to niepusta lista, zwraca [(activity, sekundy), …]. W p. p. None (tryb legacy)."""
+    raw = seg.get("processing_steps")
+    if not isinstance(raw, list) or len(raw) == 0:
+        return None
+    out: list[tuple[str, float]] = []
+    for i, item in enumerate(raw):
+        if not isinstance(item, dict):
+            raise ValueError(f"processing_steps[{i}] must be an object")
+        act = item.get("activity")
+        if not isinstance(act, str):
+            act = f"step_{i}"
+        try:
+            sec = _parse_processing_time(item.get("time"))
+        except ValueError as e:
+            raise ValueError(f"processing_steps[{i}].time: {e}") from e
+        out.append((act, sec))
+    return out
 
 
 def _first_unvisited_index(route: list[Any]) -> int | None:
@@ -294,7 +326,12 @@ def _make_handler(
                 )
                 return
             try:
-                dur = _parse_processing_time(seg.get("processing_time"))
+                steps = _parse_processing_steps(seg)
+            except ValueError as e:
+                self.send_error(400, str(e))
+                return
+            try:
+                dur_legacy = _parse_processing_time(seg.get("processing_time"))
             except ValueError as e:
                 self.send_error(400, str(e))
                 return
@@ -305,13 +342,48 @@ def _make_handler(
                     "demo.client_id": client_id,
                 },
             ) as span:
-                if dur > 0:
-                    span.set_attribute("demo.simulated_processing_sec", dur)
+                if steps is not None:
+                    total = sum(s for _, s in steps)
+                    span.set_attribute("demo.simulated_processing_sec", total)
+                    span.set_attribute("demo.processing.mode", "steps")
+                    span.set_attribute("demo.step_count", len(steps))
                     with tr.start_as_current_span(
-                        "pipeline.simulated_work",
-                        attributes={"demo.sleep_sec": dur},
+                        "pipeline.processing",
+                        attributes={
+                            "demo.processing.mode": "steps",
+                            "demo.step_count": len(steps),
+                            "demo.simulated_processing_sec": total,
+                        },
                     ):
-                        time.sleep(dur)
+                        for i, (act, sec) in enumerate(steps):
+                            name = _span_name_for_activity(act, i)
+                            with tr.start_as_current_span(
+                                name,
+                                attributes={
+                                    "demo.activity": act,
+                                    "demo.sleep_sec": sec,
+                                    "demo.step_index": i,
+                                },
+                            ):
+                                if sec > 0:
+                                    time.sleep(sec)
+                elif dur_legacy > 0:
+                    span.set_attribute("demo.simulated_processing_sec", dur_legacy)
+                    span.set_attribute("demo.processing.mode", "single")
+                    with tr.start_as_current_span(
+                        "pipeline.processing",
+                        attributes={
+                            "demo.processing.mode": "single",
+                            "demo.simulated_processing_sec": dur_legacy,
+                        },
+                    ):
+                        with tr.start_as_current_span(
+                            "pipeline.simulated_work",
+                            attributes={"demo.sleep_sec": dur_legacy},
+                        ):
+                            time.sleep(dur_legacy)
+                else:
+                    span.set_attribute("demo.processing.mode", "none")
 
                 seg["visited"] = True
                 vl = data.setdefault("visit_log", [])
@@ -419,7 +491,7 @@ def main() -> int:
 def _main_legacy() -> int:
     py_line("DEMO_MODE=exercises: legacy demo (skrót). Pełne ćwiczenia OpenTelemetry: historia gita / wcześniejsza wersja pliku.")
     p = _init_telemetry()
-    t = trace.get_tracer("demo_app", "1.0.0")
+    t = trace.get_tracer("gateway_python", "1.0.0")
     with t.start_as_current_span("legacy_demo_outlined"):
         py_line("OpenTelemetry: legacy run (użyj DEMO_MODE=pipeline dla łańcucha HTTP).")
     pr = trace.get_tracer_provider()

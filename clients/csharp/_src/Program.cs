@@ -17,8 +17,10 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using System.Text.Json.Serialization.Metadata;
+using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
 using OpenTelemetry;
+using OpenTelemetry.Context.Propagation;
 using OpenTelemetry.Exporter;
 using OpenTelemetry.Metrics;
 using OpenTelemetry.Resources;
@@ -28,7 +30,7 @@ namespace OtelDemo;
 
 public static class Program
 {
-    private static readonly ActivitySource Act = new("demo_app", "1.0.0");
+    private static readonly ActivitySource Act = new("worker_csharp", "1.0.0");
     private static readonly JsonSerializerOptions s_pipelineJson = new()
     {
         WriteIndented = false,
@@ -63,7 +65,7 @@ public static class Program
                   ?? "local";
         var tag = Environment.GetEnvironmentVariable("OTEL_DEMO_RESOURCE_TAG");
         var b = ResourceBuilder.CreateDefault()
-            .AddService("demo_app", "1.0.0", autoGenerateServiceInstanceId: false)
+            .AddService("worker_csharp", "1.0.0", autoGenerateServiceInstanceId: false)
             .AddAttributes(
                 new Dictionary<string, object>
                 {
@@ -174,6 +176,37 @@ public static class Program
         return true;
     }
 
+    private static string ActivityNameFromActivity(string act)
+    {
+        if (string.IsNullOrWhiteSpace(act))
+            return "pipeline.processing_step";
+        return act.Length <= 256 ? act : act[..256];
+    }
+
+    /// <summary>
+    /// Span <c>pipeline.hop</c> z rodzicem z nagłówków W3C (<c>traceparent</c>) — tak samo jak Python/Rust,
+    /// bo <see cref="Activity.Current"/> z ASP.NET bywa puste lub bez relacji do upstreamu przy minimalnych API.
+    /// </summary>
+    private static Activity? StartPipelineHopActivity(PropagationContext incoming)
+    {
+        var remote = incoming.ActivityContext;
+        if (remote.TraceId != default)
+            return Act.StartActivity("pipeline.hop", ActivityKind.Server, remote);
+
+        var cur = Activity.Current;
+        if (cur is not null)
+            return Act.StartActivity("pipeline.hop", ActivityKind.Internal, cur.Context);
+        return Act.StartActivity("pipeline.hop", ActivityKind.Server);
+    }
+
+    private static IEnumerable<string> TraceHeadersGetter(IHeaderDictionary headers, string name)
+    {
+        if (!headers.TryGetValue(name, out var values))
+            return Array.Empty<string>();
+        var s = values.ToString();
+        return string.IsNullOrEmpty(s) ? Array.Empty<string>() : new[] { s };
+    }
+
     private static int? FirstUnvisited(JsonArray route)
     {
         for (var i = 0; i < route.Count; i++)
@@ -218,6 +251,9 @@ public static class Program
             return;
         }
 
+        // W3C traceparent — inbound Activity + outbound HttpClient używają tego samego co inne workery.
+        Sdk.SetDefaultTextMapPropagator(new TraceContextPropagator());
+
         var builder = WebApplication.CreateBuilder();
         var verboseFw = VerboseFrameworkLogs();
         if (!verboseFw)
@@ -255,6 +291,8 @@ public static class Program
 
         builder.WebHost.UseUrls(l);
 
+        var pipelinePath = GetLo("DEMO_HTTP_PATH", "/v1/pipeline");
+
         if (UseOtlp())
         {
             builder.Services.AddOpenTelemetry()
@@ -262,7 +300,19 @@ public static class Program
                     t => t
                         .SetResourceBuilder(ResB())
                         .AddSource(Act.Name)
-                        .AddAspNetCoreInstrumentation()
+                        .AddAspNetCoreInstrumentation(o =>
+                        {
+                            // Filter: true = zbieraj. Dla /v1/pipeline zwracamy false — bez osobnego spanu „POST …”.
+                            o.Filter = ctx =>
+                            {
+                                var req = ctx.Request.Path.Value ?? "";
+                                var isPipeline = req.Equals(pipelinePath, StringComparison.OrdinalIgnoreCase)
+                                                 || req.TrimEnd('/').Equals(
+                                                     pipelinePath.TrimEnd('/'),
+                                                     StringComparison.OrdinalIgnoreCase);
+                                return !isPipeline;
+                            };
+                        })
                         .AddHttpClientInstrumentation()
                         .AddOtlpExporter(
                             o =>
@@ -273,7 +323,7 @@ public static class Program
                 .WithMetrics(
                     m => m
                         .SetResourceBuilder(ResB())
-                        .AddMeter("demo_app")
+                        .AddMeter("worker_csharp")
                         .AddOtlpExporter(
                             o =>
                             {
@@ -288,17 +338,28 @@ public static class Program
                     tt => tt
                         .SetResourceBuilder(ResB())
                         .AddSource(Act.Name)
-                        .AddAspNetCoreInstrumentation()
+                        .AddAspNetCoreInstrumentation(o =>
+                        {
+                            o.Filter = ctx =>
+                            {
+                                var req = ctx.Request.Path.Value ?? "";
+                                var isPipeline = req.Equals(pipelinePath, StringComparison.OrdinalIgnoreCase)
+                                                 || req.TrimEnd('/').Equals(
+                                                     pipelinePath.TrimEnd('/'),
+                                                     StringComparison.OrdinalIgnoreCase);
+                                return !isPipeline;
+                            };
+                        })
                         .AddHttpClientInstrumentation());
         }
 
         var app = builder.Build();
-        var path = GetLo("DEMO_HTTP_PATH", "/v1/pipeline");
+        var path = pipelinePath;
         var cid = GetLo("DEMO_CLIENT_ID", "cs");
         var peers = LoadPeerMap();
         var maxProc = MaxProcSec();
 
-        var m = new Meter("demo_app", "1.0.0");
+        var m = new Meter("worker_csharp", "1.0.0");
         var msgCount = m.CreateCounter<long>("demo.pipeline.messages", description: "messages processed in node");
         var hopDuration = m.CreateHistogram<double>("demo.pipeline.hop.duration_ms", description: "hop time ms", unit: "ms");
 
@@ -310,6 +371,10 @@ public static class Program
             async (HttpContext ctx, IHttpClientFactory httpFactory) =>
             {
                 ctx.Request.EnableBuffering();
+                var incomingTrace = Propagators.DefaultTextMapPropagator.Extract(
+                    default,
+                    ctx.Request.Headers,
+                    TraceHeadersGetter);
                 string text;
                 using (var r = new StreamReader(ctx.Request.Body, Encoding.UTF8, leaveOpen: true))
                 {
@@ -341,7 +406,8 @@ public static class Program
                         maxProc,
                         httpFactory,
                         hopDuration,
-                        msgCount);
+                        msgCount,
+                        incomingTrace);
                     return routeRes;
                 }
 
@@ -359,10 +425,11 @@ public static class Program
         double maxProc,
         IHttpClientFactory httpFactory,
         Histogram<double> hopDuration,
-        Counter<long> msgCount)
+        Counter<long> msgCount,
+        PropagationContext incomingTrace)
     {
         var t0 = Stopwatch.GetTimestamp();
-        using var hopAct = Act.StartActivity("pipeline.hop", kind: ActivityKind.Server);
+        using var hopAct = StartPipelineHopActivity(incomingTrace);
 
         var fi = FirstUnvisited(route);
         if (fi is null)
@@ -379,16 +446,63 @@ public static class Program
                 $"first unvisited route segment id must match this node (expected {cid}, got {segId})");
         }
 
-        var pt = seg["processing_time"]?.GetValue<string>();
-        if (!TryParseProcessing(pt, maxProc, out var sleepSec, out var perr))
-            return Results.BadRequest(perr ?? "invalid processing_time");
-
-        if (sleepSec > 0)
+        if (seg["processing_steps"] is JsonArray stepsArr && stepsArr.Count > 0)
         {
-            using (Act.StartActivity("pipeline.simulated_work", kind: ActivityKind.Internal))
+            var list = new List<(string Act, double Sec)>();
+            for (var i = 0; i < stepsArr.Count; i++)
+            {
+                var o = stepsArr[i]?.AsObject();
+                if (o is null)
+                    return Results.BadRequest($"processing_steps[{i}] must be an object");
+                var act = o["activity"]?.GetValue<string>() ?? $"step_{i}";
+                if (!TryParseProcessing(o["time"]?.GetValue<string>(), maxProc, out var sec, out var perr))
+                    return Results.BadRequest(perr ?? $"processing_steps[{i}].time invalid");
+                list.Add((act, sec));
+            }
+
+            var total = list.Sum(x => x.Sec);
+            hopAct?.SetTag("demo.simulated_processing_sec", total);
+            hopAct?.SetTag("demo.processing.mode", "steps");
+            hopAct?.SetTag("demo.step_count", list.Count);
+            using (Act.StartActivity("pipeline.processing", ActivityKind.Internal))
+            {
+                for (var i = 0; i < list.Count; i++)
+                {
+                    var (act, sec) = list[i];
+                    var name = ActivityNameFromActivity(act);
+                    using (Act.StartActivity(name, ActivityKind.Internal))
+                    {
+                        Activity.Current?.SetTag("demo.activity", act);
+                        Activity.Current?.SetTag("demo.sleep_sec", sec);
+                        Activity.Current?.SetTag("demo.step_index", i);
+                        if (sec > 0)
+                            await Task.Delay(TimeSpan.FromSeconds(sec));
+                    }
+                }
+            }
+        }
+        else
+        {
+            var pt = seg["processing_time"]?.GetValue<string>();
+            if (!TryParseProcessing(pt, maxProc, out var sleepSec, out var perr))
+                return Results.BadRequest(perr ?? "invalid processing_time");
+
+            if (sleepSec > 0)
             {
                 hopAct?.SetTag("demo.simulated_processing_sec", sleepSec);
-                await Task.Delay(TimeSpan.FromSeconds(sleepSec));
+                hopAct?.SetTag("demo.processing.mode", "single");
+                using (Act.StartActivity("pipeline.processing", ActivityKind.Internal))
+                {
+                    using (Act.StartActivity("pipeline.simulated_work", ActivityKind.Internal))
+                    {
+                        Activity.Current?.SetTag("demo.sleep_sec", sleepSec);
+                        await Task.Delay(TimeSpan.FromSeconds(sleepSec));
+                    }
+                }
+            }
+            else
+            {
+                hopAct?.SetTag("demo.processing.mode", "none");
             }
         }
 

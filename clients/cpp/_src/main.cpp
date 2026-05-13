@@ -110,7 +110,7 @@ static std::string demo_deploy_env()
 opentelemetry::sdk::resource::Resource demo_resource()
 {
   opentelemetry::sdk::resource::ResourceAttributes attrs;
-  attrs["service.name"]           = std::string("demo_app");
+  attrs["service.name"]           = std::string("worker_cpp");
   attrs["service.version"]        = std::string("1.0.0");
   attrs["service.instance.id"]    = demo_instance_id();
   attrs["deployment.environment"] = demo_deploy_env();
@@ -296,7 +296,7 @@ int main(int argc, char* argv[])
     }
 
     const auto provider = trace_api::Provider::GetTracerProvider();
-    const auto tracer   = provider->GetTracer("demo_app", "1.0.0");
+    const auto tracer   = provider->GetTracer("worker_cpp", "1.0.0");
     opentelemetry_api_exercises(tracer);
 
     line("OpenTelemetry: zakończone (stderr vs OTLP — patrz OTEL_DEMO_TRACE_EXPORT).");

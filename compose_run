@@ -2,6 +2,8 @@
 
 # docker compose up
 
+# docker compose build --no-cache gateway-python client-rust client-csharp
+
 docker compose up -d
 docker compose logs -f traffic_generator gateway-python client-rust client-csharp
 

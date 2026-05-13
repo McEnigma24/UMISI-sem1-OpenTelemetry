@@ -44,7 +44,10 @@ def _line(msg: str) -> None:
 def _default_payload() -> dict[str, Any]:
     return {
         "route": [
-            {"id": "py", "visited": False, "processing_time": "0.05s"},
+            {"id": "py", "visited": False, "processing_steps": [
+                {"activity": "preparing-file", "time": "0.05s"},
+                {"activity": "quering DB", "time": "0.05s"},
+            ]},
             {"id": "rs", "visited": False, "processing_time": "0.05s"},
             {"id": "cs", "visited": False, "processing_time": "0.05s"},
         ],
@@ -386,6 +389,7 @@ async def group_runner(
             _line(f"[{name}] done after {repetitions_limit} repetition(s)")
             break
 
+        _line(f"")
         _line(f"[{name}] repetition {rep_i + 1} begin")
 
         wave_aborted = False
