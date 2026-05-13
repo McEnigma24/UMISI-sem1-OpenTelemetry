@@ -7,8 +7,10 @@
 #
 # UI: Jaeger http://localhost:16686  |  Prometheus http://localhost:9090  |  Grafana http://localhost:3000 (admin/admin)
 #
-# HTTP pipeline: niepusty JSON ``route`` + DEMO_PEER_* (mapa hopów). Z hosta tylko gateway: localhost:18080.
-# Stub traffic_generator: `docker compose run --rm traffic_generator` lub `DEMO_PAYLOAD_FILE` z przykładowym route.
+# HTTP pipeline: niepusty JSON ``route`` + DEMO_PEER_* (mapa hopów). Z hosta gateway: http://127.0.0.1:18080
+# (POST /v1/pipeline; ``localhost`` bywa IPv6 — lepiej 127.0.0.1). Diagnoza: ``docker compose ps``, logi
+# ``gateway-python`` / ``client-csharp`` / ``client-rust``; pierwsze sekundy po starcie workery mogą jeszcze nie forwardować.
+# Stub traffic_generator: compose lub ręcznie: cd stub/sender/python_traffic_generator && ./docker_run.sh
 #
 services:
 
@@ -108,6 +110,7 @@ services:
       context: ./clients/csharp
     image: client_csharp
     environment:
+      ASPNETCORE_URLS: http://0.0.0.0:8080
       OTEL_DEMO_TRACE_EXPORT: otlp
       OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://otel:4318/v1/traces
       OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: http://otel:4318/v1/metrics
@@ -129,6 +132,7 @@ services:
       context: ./clients/python
     image: client_python
     ports:
+      # Mapowanie na hosta (domyślnie nasłuch na 0.0.0.0 — dostęp z LAN: http://<IP_hosta>:18080)
       - "18080:8080"
     environment:
       OTEL_DEMO_TRACE_EXPORT: otlp
@@ -145,12 +149,7 @@ services:
     depends_on:
       otel:
         condition: service_started
-      # client-cpp:
-      #   condition: service_started
-      client-rust:
-        condition: service_started
-      client-csharp:
-        condition: service_started
+      # Workery startują równolegle; gateway nasłuchuje bez czekania na ich bind (Compose „started” ≠ port gotowy).
     healthcheck:
       test:
         [
@@ -166,20 +165,20 @@ services:
 
 
 
-  # Traffic Generator #
-  traffic_generator:
-    build:
-      context: ./stub/sender/python_traffic_generator
-    image: traffic_generator
-    environment:
-      DEMO_TARGET_URL: http://gateway-python:8080/v1/pipeline
+  # # Traffic Generator #
+  # traffic_generator:
+  #   build:
+  #     context: ./stub/sender/python_traffic_generator
+  #   image: traffic_generator
+  #   environment:
+  #     DEMO_TARGET_URL: http://gateway-python:8080/v1/pipeline
 
-      # DEMO_PAYLOAD_FILE: /app/routes/1-scenario.json
-      DEMO_SCENARIO_FILE: /app/scenarios/1-scenario-sequential.json
-      # DEMO_SCENARIO_FILE: /app/scenarios/2-scenario-parallel.json
-    depends_on:
-      gateway-python:
-        condition: service_healthy
+  #     # DEMO_PAYLOAD_FILE: /app/routes/1-scenario.json
+  #     DEMO_SCENARIO_FILE: /app/scenarios/1-scenario-sequential.json
+  #     # DEMO_SCENARIO_FILE: /app/scenarios/2-scenario-parallel.json
+  #   depends_on:
+  #     gateway-python:
+  #       condition: service_healthy
 
 
 
@@ -216,7 +215,7 @@ services:
 # umisi-sem1-opentelemetry - gateway-python - 1
 
 
-  #   command:
-  #     - /bin/sh
-  #     - -c
-  #     - "sleep 2 && exec python _src/main.py"
+#   command:
+#     - /bin/sh
+#     - -c
+#     - "sleep 2 && exec python _src/main.py"

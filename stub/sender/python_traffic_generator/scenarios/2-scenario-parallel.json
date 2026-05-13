@@ -1,6 +1,5 @@
 {
   "defaults": {
-    "target_url": "http://gateway-python:8080/v1/pipeline",
     "client_log": "/app/client_e2e.log",
     "timeout_sec": 120
   },
@@ -8,8 +7,8 @@
     {
       "name": "parallel_burst",
       "initial_delay_sec": 5,
-      "periodicity": 10,
-      "repetitions": 3,
+      "periodicity": 1,
+      "repetitions": 300,
       "send": {
         "mode": "parallel",
         "payload_files": ["1-route.json", "1-route.json", "1-route.json"]

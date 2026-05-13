@@ -1,6 +1,5 @@
 {
   "defaults": {
-    "target_url": "http://gateway-python:8080/v1/pipeline",
     "client_log": "/app/client_e2e.log",
     "timeout_sec": 120
   },

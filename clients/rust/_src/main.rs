@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::env;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::body::Bytes;
@@ -36,6 +36,7 @@ use opentelemetry_sdk::trace::SdkTracerProvider;
 use opentelemetry_sdk::Resource;
 use serde::Deserialize;
 use serde::Serialize;
+use sysinfo::{Pid, ProcessesToUpdate, System};
 use tokio::net::TcpListener;
 use uuid::Uuid;
 
@@ -161,6 +162,89 @@ fn metrics_otlp_endpoint() -> String {
     let traces = env::var("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
         .unwrap_or_else(|_| "http://127.0.0.1:4318/v1/traces".to_string());
     traces.replace("/v1/traces", "/v1/metrics")
+}
+
+fn process_metrics_enabled() -> bool {
+    let v = env::var("DEMO_PROCESS_METRICS").unwrap_or_default().to_lowercase();
+    !matches!(v.as_str(), "0" | "false" | "no" | "off")
+}
+
+fn process_metric_point_attributes() -> [KeyValue; 2] {
+    let service_name = env::var("OTEL_SERVICE_NAME")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "worker_rust".to_string());
+    let client_id = env::var("DEMO_CLIENT_ID")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "rs".to_string());
+    [
+        KeyValue::new("service.name", service_name),
+        KeyValue::new("demo.client_id", client_id),
+    ]
+}
+
+fn register_process_metrics(meter: &opentelemetry::metrics::Meter) {
+    if !process_metrics_enabled() || !use_otlp() {
+        return;
+    }
+    let sys = Arc::new(Mutex::new(System::new_all()));
+    let s_cpu = sys.clone();
+    let _cpu_g = meter
+        .f64_observable_gauge("demo.process.cpu.utilization")
+        .with_unit("%")
+        .with_description("Użycie CPU procesu 0–100")
+        .with_callback(move |o| {
+            let mut s = s_cpu.lock().unwrap();
+            s.refresh_processes(ProcessesToUpdate::All);
+            let pid = Pid::from_u32(std::process::id() as u32);
+            if let Some(p) = s.process(pid) {
+                let v = (p.cpu_usage() as f64).clamp(0.0, 100.0);
+                let attrs = process_metric_point_attributes();
+                o.observe(v, &attrs);
+            }
+        })
+        .build();
+    let s_mem = sys.clone();
+    let _mem_g = meter
+        .u64_observable_gauge("demo.process.memory.usage")
+        .with_unit("By")
+        .with_description("RSS procesu (bajty)")
+        .with_callback(move |o| {
+            let mut s = s_mem.lock().unwrap();
+            s.refresh_processes(ProcessesToUpdate::All);
+            let pid = Pid::from_u32(std::process::id() as u32);
+            if let Some(p) = s.process(pid) {
+                let attrs = process_metric_point_attributes();
+                o.observe(p.memory(), &attrs);
+            }
+        })
+        .build();
+    let _ = (_cpu_g, _mem_g);
+}
+
+async fn spin_cpu_seconds(sec: f64) {
+    if sec <= 0.0 {
+        return;
+    }
+    let cx = Context::current();
+    let res = tokio::task::spawn_blocking(move || {
+        let _guard = cx.clone().attach();
+        let deadline = Instant::now() + Duration::from_secs_f64(sec);
+        let mut v: u64 = 1;
+        while Instant::now() < deadline {
+            for _ in 0..2048 {
+                v = v.wrapping_mul(1103515245).wrapping_add(12345);
+                std::hint::black_box(v);
+            }
+        }
+    })
+    .await;
+    if let Err(e) = res {
+        rs_line(&format!("cpu spin join error: {e}"));
+    }
 }
 
 fn init_metrics_provider() -> SdkMeterProvider {
@@ -411,15 +495,13 @@ async fn route_mode(st: &St, parent: &Context, mut m: PipelineMsg) -> Response {
                 let name = span_name_for_activity(act);
                 let mut step = t.start_with_context(name, &proc_cx);
                 step.set_attribute(KeyValue::new("demo.activity", act.clone()));
-                step.set_attribute(KeyValue::new("demo.sleep_sec", *sec));
+                step.set_attribute(KeyValue::new("demo.cpu_spin_sec", *sec));
                 step.set_attribute(KeyValue::new("demo.step_index", i as i64));
                 let step_cx = proc_cx.clone().with_span(step);
                 if *sec > 0.0 {
-                    let sl = async {
-                        tokio::time::sleep(Duration::from_secs_f64(*sec)).await;
-                    }
-                    .with_context(step_cx);
-                    sl.await;
+                    async { spin_cpu_seconds(*sec).await }
+                        .with_context(step_cx.clone())
+                        .await;
                 }
             }
         }
@@ -429,13 +511,11 @@ async fn route_mode(st: &St, parent: &Context, mut m: PipelineMsg) -> Response {
             proc.set_attribute(KeyValue::new("demo.simulated_processing_sec", *dur));
             let proc_cx = hop_cx.clone().with_span(proc);
             let mut sw = t.start_with_context("pipeline.simulated_work", &proc_cx);
-            sw.set_attribute(KeyValue::new("demo.sleep_sec", *dur));
+            sw.set_attribute(KeyValue::new("demo.cpu_spin_sec", *dur));
             let sw_cx = proc_cx.clone().with_span(sw);
-            let sl = async {
-                tokio::time::sleep(Duration::from_secs_f64(*dur)).await;
-            }
-            .with_context(sw_cx);
-            sl.await;
+            async { spin_cpu_seconds(*dur).await }
+                .with_context(sw_cx.clone())
+                .await;
         }
         WorkPlan::None => {}
     }
@@ -563,6 +643,7 @@ async fn main() {
         .u64_counter("demo.pipeline.messages")
         .with_description("Liczba przetworzonych wiadomości w węźle")
         .build();
+    register_process_metrics(&meter);
     let peers = match load_peer_map() {
         Ok(m) => m,
         Err(e) => {

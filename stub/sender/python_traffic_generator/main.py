@@ -2,6 +2,10 @@
 """
 Klient zewnętrzny (bez OTLP): POST na gateway — pojedynczy request lub scenariusz z pliku.
 
+Uruchomienie w Dockerze: ``docker_run.sh`` — ``--network host`` i stały URL
+  ``http://localhost:18080/v1/pipeline`` (port z ``docker-compose`` dla gateway). Wymaga Linux/WSL;
+  scenariusz domyślnie ``2-scenario-parallel.json`` (montowany z repo).
+
 Tryb 1 — pojedynczy request (domyślny gdy brak DEMO_SCENARIO_FILE):
   DEMO_TARGET_URL, DEMO_PAYLOAD_FILE (opcj.), DEMO_CLIENT_LOG
 
@@ -11,10 +15,11 @@ Tryb 2 — scenariusz (meta-level):
     - periodicity — sekundy przerwy między kolejnymi seriami requestów (po każdej serii)
     - repetitions — ile razy powtórzyć całą serię (send.payload_files); null lub brak = bez końca,
       dopóki globalny stop
-    - send.mode: sequential | parallel (w jednej serii: kolejno vs równolegle)
+    - send.mode: sequential | parallel (parallel = równoczesne POST httpx, nie kolejka wątków urllib)
     - send.payload_files — lista payloadów: pojedyncza nazwa pliku (bez „/”) szuka w ``routes/``
       obok katalogu ``scenarios/``; ścieżka z podkatalogiem jest względna do katalogu pliku scenariusza
-  defaults: target_url, client_log, timeout_sec
+  defaults: target_url, client_log, timeout_sec — jeśli ustawione ``DEMO_TARGET_URL`` / ``DEMO_CLIENT_LOG``
+    w środowisku, mają pierwszeństwo nad polami w pliku (żeby ten sam scenariusz działał w compose i przy ręcznym Dockerze).
   stop (opcjonalnie): after_duration_sec / duration_sec, after_total_requests / total_requests
     — jeśli podane, uruchamiany jest monitor kończący wszystkie grupy.
   Grupy działają równolegle (osobne asyncio task). SIGINT/SIGTERM zatrzymują.
@@ -33,6 +38,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+import httpx
 
 
 def _line(msg: str) -> None:
@@ -109,6 +116,44 @@ def _sync_post(
         return -1, dur_ms, str(e)
 
 
+async def _scenario_post(
+    client: httpx.AsyncClient,
+    url: str,
+    payload: dict[str, Any],
+    timeout_sec: float,
+    log_path: str,
+    detail_prefix: str,
+) -> tuple[int, float, str]:
+    """POST JSON — używane w scenariuszu (httpx = prawdziwie równoległe I/O w trybie parallel)."""
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    t0 = time.perf_counter()
+    try:
+        resp = await client.post(
+            url,
+            content=body,
+            headers={
+                "Content-Type": "application/json; charset=utf-8",
+                "User-Agent": "demo-external-client/httpx-scenario",
+            },
+            timeout=httpx.Timeout(timeout_sec),
+        )
+        dur_ms = (time.perf_counter() - t0) * 1000.0
+        text = resp.text
+        code = resp.status_code
+        _append_log(
+            log_path,
+            url,
+            code,
+            dur_ms,
+            f"{detail_prefix} body_len={len(text)}",
+        )
+        return code, dur_ms, f"HTTP {code} {len(text)}B"
+    except httpx.RequestError as e:
+        dur_ms = (time.perf_counter() - t0) * 1000.0
+        _append_log(log_path, url, -1, dur_ms, f"{detail_prefix} {e}")
+        return -1, dur_ms, str(e)
+
+
 def _append_log(path: str, url: str, status: int, dur_ms: float, detail: str) -> None:
     now = datetime.now().isoformat(timespec="milliseconds")
     line = f"{now}\t{dur_ms:.1f}ms\tstatus={status}\turl={url}\t{detail}\n"
@@ -130,7 +175,7 @@ def main() -> int:
 
 def run_single() -> int:
     url = os.environ.get(
-        "DEMO_TARGET_URL", "http://127.0.0.1:18080/v1/pipeline"
+        "DEMO_TARGET_URL", "http://localhost:18080/v1/pipeline"
     )
     log_path = os.environ.get("DEMO_CLIENT_LOG", "client_e2e.log").strip()
     pf = os.environ.get("DEMO_PAYLOAD_FILE", "").strip()
@@ -186,19 +231,27 @@ async def run_scenario(scenario_file: Path) -> int:
         print("scenario.groups must be a non-empty array", file=sys.stderr)
         return 1
 
+    _line(f"scenario file: {scenario_file.resolve()}")
+
     def_url = (
-        str(defaults.get("target_url") or "").strip()
-        or os.environ.get("DEMO_TARGET_URL", "").strip()
-        or "http://127.0.0.1:18080/v1/pipeline"
+        os.environ.get("DEMO_TARGET_URL", "").strip()
+        or str(defaults.get("target_url") or "").strip()
+        or "http://localhost:18080/v1/pipeline"
     )
     def_log = (
-        str(defaults.get("client_log") or defaults.get("demo_client_log") or "").strip()
-        or os.environ.get("DEMO_CLIENT_LOG", "client_e2e.log").strip()
+        os.environ.get("DEMO_CLIENT_LOG", "").strip()
+        or str(defaults.get("client_log") or defaults.get("demo_client_log") or "").strip()
+        or "client_e2e.log"
     )
     timeout_sec = float(
         defaults.get("timeout_sec")
         or defaults.get("request_timeout_sec")
         or os.environ.get("DEMO_REQUEST_TIMEOUT_SEC", "120")
+    )
+
+    _line(
+        f"scenario resolved defaults: target_url={def_url!r} client_log={def_log!r} "
+        f"timeout_sec={timeout_sec}"
     )
 
     duration_sec = stop_cfg.get("after_duration_sec")
@@ -381,68 +434,82 @@ async def group_runner(
 
     await asyncio.sleep(initial)
 
-    rep_i = 0
-    while True:
-        if await _should_stop_global(state, dur_limit_sec, req_cap):
-            break
-        if repetitions_limit is not None and rep_i >= repetitions_limit:
-            _line(f"[{name}] done after {repetitions_limit} repetition(s)")
-            break
+    max_conn = max(32, len(files) * 8)
+    async with httpx.AsyncClient(
+        limits=httpx.Limits(
+            max_connections=max_conn,
+            max_keepalive_connections=max_conn,
+        ),
+    ) as client:
+        rep_i = 0
+        while True:
+            if await _should_stop_global(state, dur_limit_sec, req_cap):
+                break
+            if repetitions_limit is not None and rep_i >= repetitions_limit:
+                _line(f"[{name}] done after {repetitions_limit} repetition(s)")
+                break
 
-        _line(f"")
-        _line(f"[{name}] repetition {rep_i + 1} begin")
+            _line("")
+            _line(f"[{name}] repetition {rep_i + 1} begin")
 
-        wave_aborted = False
-        if mode == "sequential":
-            for fi, fp in enumerate(files):
-                if state.stop.is_set():
-                    wave_aborted = True
-                    break
-                async with state.lock:
-                    if req_cap is not None and state.total_requests >= req_cap:
+            wave_aborted = False
+            if mode == "sequential":
+                for fi, fp in enumerate(files):
+                    if state.stop.is_set():
                         wave_aborted = True
                         break
-                payload = await asyncio.to_thread(_load_payload_file, fp)
-                detail = f"g={name} rep={rep_i} seq={fi} file={fp.name}"
-                code, dur_ms, msg = await asyncio.to_thread(
-                    _sync_post, url, payload, timeout_sec, log_path, detail
+                    async with state.lock:
+                        if req_cap is not None and state.total_requests >= req_cap:
+                            wave_aborted = True
+                            break
+                    payload = _load_payload_file(fp)
+                    detail = f"g={name} rep={rep_i} seq={fi} file={fp.name}"
+                    code, dur_ms, msg = await _scenario_post(
+                        client, url, payload, timeout_sec, log_path, detail
+                    )
+                    async with state.lock:
+                        state.total_requests += 1
+                    _line(f"[{name}] {detail} -> {msg} ({dur_ms:.1f} ms)")
+                    if await _should_stop_global(state, dur_limit_sec, req_cap):
+                        wave_aborted = True
+                        break
+            else:
+                payloads = [_load_payload_file(fp) for fp in files]
+
+                async def one_parallel(
+                    seq: int, payload: dict[str, Any], fname: str
+                ) -> None:
+                    detail = f"g={name} rep={rep_i} par={seq} file={fname}"
+                    _c, dur_ms, msg = await _scenario_post(
+                        client, url, payload, timeout_sec, log_path, detail
+                    )
+                    async with state.lock:
+                        state.total_requests += 1
+                    _line(f"[{name}] {detail} -> {msg} ({dur_ms:.1f} ms)")
+
+                await asyncio.gather(
+                    *[
+                        one_parallel(j, payloads[j], files[j].name)
+                        for j in range(len(files))
+                    ]
                 )
-                async with state.lock:
-                    state.total_requests += 1
-                _line(f"[{name}] {detail} -> {msg} ({dur_ms:.1f} ms)")
                 if await _should_stop_global(state, dur_limit_sec, req_cap):
                     wave_aborted = True
-                    break
-        else:
 
-            async def one_file(fp: Path, seq: int) -> None:
-                payload = await asyncio.to_thread(_load_payload_file, fp)
-                detail = f"g={name} rep={rep_i} par={seq} file={fp.name}"
-                _code, dur_ms, msg = await asyncio.to_thread(
-                    _sync_post, url, payload, timeout_sec, log_path, detail
-                )
-                async with state.lock:
-                    state.total_requests += 1
-                _line(f"[{name}] {detail} -> {msg} ({dur_ms:.1f} ms)")
+            if wave_aborted:
+                break
 
-            await asyncio.gather(*[one_file(fp, j) for j, fp in enumerate(files)])
+            rep_i += 1
+
+            if repetitions_limit is not None and rep_i >= repetitions_limit:
+                _line(f"[{name}] done after {repetitions_limit} repetition(s)")
+                break
+
             if await _should_stop_global(state, dur_limit_sec, req_cap):
-                wave_aborted = True
+                break
 
-        if wave_aborted:
-            break
-
-        rep_i += 1
-
-        if repetitions_limit is not None and rep_i >= repetitions_limit:
-            _line(f"[{name}] done after {repetitions_limit} repetition(s)")
-            break
-
-        if await _should_stop_global(state, dur_limit_sec, req_cap):
-            break
-
-        if periodicity > 0:
-            await asyncio.sleep(periodicity)
+            if periodicity > 0:
+                await asyncio.sleep(periodicity)
 
 
 if __name__ == "__main__":

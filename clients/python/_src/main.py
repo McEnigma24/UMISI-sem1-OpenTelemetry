@@ -4,8 +4,7 @@ Pipeline HTTP: POST /v1/pipeline (JSON).
 
 Payload musi zawierać niepustą listę ``route`` (pierwszy segment = gateway, np. ``py``):
   Każdy węzeł obsługuje pierwszy nieodwiedzony segment z ``id`` == DEMO_CLIENT_ID,
-  symuluje pracę albo pojedynczym ``processing_time`` (np. ``0.5s`` / ``100ms``),
-  albo listą ``processing_steps``: ``[{"activity": "…", "time": "0.5s"}, …]``
+  symuluje pracę CPU (pętla obliczeń) przez ``processing_time`` lub ``processing_steps`` …
   (wspólny span ``pipeline.processing``, podspany o nazwie ``activity`` — jeden traceId).
   Oznacza visited, aktualizuje counter/table/visit_log, forward wg DEMO_PEER_* / DEMO_PEER_MAP.
 
@@ -14,7 +13,8 @@ OTLP: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT, opcj. metryki.
 Demo ENV:
   DEMO_HTTP_ADDR, DEMO_HTTP_PATH, DEMO_CLIENT_ID
   DEMO_PEER_PY, DEMO_PEER_RS, DEMO_PEER_CS — URL pełny do pipeline (lub DEMO_PEER_MAP jako JSON obiekt id->url)
-  DEMO_MAX_PROCESSING_SEC — opcjonalny limit czasu snu (domyślnie 120)
+  DEMO_MAX_PROCESSING_SEC — limit czasu symulacji CPU (domyślnie 120)
+  DEMO_PROCESS_METRICS — false/0: bez gauge'y demo.process.* (domyślnie włączone; punkty mają service.name + demo.client_id)
 """
 from __future__ import annotations
 
@@ -31,12 +31,15 @@ from typing import Any
 from urllib import error as urlerror
 from urllib import request as urlrequest
 
+import psutil
+
 from opentelemetry import metrics, trace
 from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry import context as otel_context
 from opentelemetry.propagate import extract, inject, set_global_textmap
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+from opentelemetry.metrics import Observation
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
 from opentelemetry.sdk.resources import Resource
@@ -46,6 +49,10 @@ from opentelemetry.sdk.trace.sampling import ALWAYS_ON
 
 _TRACER: trace.Tracer | None = None
 _METER: metrics.Meter | None = None
+
+
+class _ReusableThreadingHTTPServer(ThreadingHTTPServer):
+    allow_reuse_address = True
 
 
 def py_line(msg: str) -> None:
@@ -99,6 +106,57 @@ def _use_otlp_http() -> bool:
     return False
 
 
+def _process_metrics_enabled() -> bool:
+    v = os.environ.get("DEMO_PROCESS_METRICS", "true").strip().lower()
+    return v not in ("0", "false", "no", "off")
+
+
+def _process_metric_point_attributes() -> dict[str, str]:
+    """Atrybuty punktu OTLP → osobne serie w Prometheusie (resource często nie trafia jako label)."""
+    sn = (os.environ.get("OTEL_SERVICE_NAME") or "").strip() or "gateway_python"
+    cid = (os.environ.get("DEMO_CLIENT_ID") or "py").strip() or "py"
+    return {"service.name": sn, "demo.client_id": cid}
+
+
+def _cpu_spin_seconds(sec: float) -> None:
+    """Symulacja pracy CPU do momentu ``deadline`` (zegar monotoniczny)."""
+    if sec <= 0.0:
+        return
+    deadline = time.perf_counter() + sec
+    v = 1
+    while time.perf_counter() < deadline:
+        for _ in range(1024):
+            v = (v * 1103515245 + 12345) & 0x7FFFFFFF
+
+
+def _register_process_metrics(meter: metrics.Meter) -> None:
+    if not _process_metrics_enabled():
+        return
+    proc = psutil.Process()
+
+    def _cpu_cb(_options: Any) -> Any:
+        pct = float(proc.cpu_percent(interval=None))
+        pct = min(100.0, max(0.0, pct))
+        yield Observation(pct, _process_metric_point_attributes())
+
+    def _mem_cb(_options: Any) -> Any:
+        attrs = _process_metric_point_attributes()
+        yield Observation(float(proc.memory_info().rss), attrs)
+
+    meter.create_observable_gauge(
+        name="demo.process.cpu.utilization",
+        callbacks=[_cpu_cb],
+        unit="%",
+        description="Użycie CPU procesu 0–100 (psutil)",
+    )
+    meter.create_observable_gauge(
+        name="demo.process.memory.usage",
+        callbacks=[_mem_cb],
+        unit="By",
+        description="RSS procesu (bajty)",
+    )
+
+
 def _init_telemetry() -> TracerProvider:
     global _TRACER, _METER
     # Jawny W3C tracecontext — spójnie z workerami (Rust); bez tego zależność od domyślnego OTEL_PROPAGATORS.
@@ -124,6 +182,8 @@ def _init_telemetry() -> TracerProvider:
 
     _TRACER = trace.get_tracer("gateway_python", "1.0.0")
     _METER = metrics.get_meter("gateway_python", "1.0.0")
+    if _use_otlp_http() and _process_metrics_enabled():
+        _register_process_metrics(_METER)
     return provider  # type: ignore[return-value]
 
 
@@ -361,12 +421,12 @@ def _make_handler(
                                 name,
                                 attributes={
                                     "demo.activity": act,
-                                    "demo.sleep_sec": sec,
+                                    "demo.cpu_spin_sec": sec,
                                     "demo.step_index": i,
                                 },
                             ):
                                 if sec > 0:
-                                    time.sleep(sec)
+                                    _cpu_spin_seconds(sec)
                 elif dur_legacy > 0:
                     span.set_attribute("demo.simulated_processing_sec", dur_legacy)
                     span.set_attribute("demo.processing.mode", "single")
@@ -379,9 +439,9 @@ def _make_handler(
                     ):
                         with tr.start_as_current_span(
                             "pipeline.simulated_work",
-                            attributes={"demo.sleep_sec": dur_legacy},
+                            attributes={"demo.cpu_spin_sec": dur_legacy},
                         ):
-                            time.sleep(dur_legacy)
+                            _cpu_spin_seconds(dur_legacy)
                 else:
                     span.set_attribute("demo.processing.mode", "none")
 
@@ -452,7 +512,7 @@ def _make_handler(
 
 
 def run_server() -> None:
-    addr = os.environ.get("DEMO_HTTP_ADDR", "0.0.0.0:8080")
+    addr = os.environ.get("DEMO_HTTP_ADDR", "0.0.0.0:8080").strip()
     host, _, port_s = addr.rpartition(":")
     port = int(port_s or "8080")
     path = os.environ.get("DEMO_HTTP_PATH", "/v1/pipeline")
@@ -467,7 +527,15 @@ def run_server() -> None:
     if _TRACER is None:
         raise SystemExit(1)
     hcls = _make_handler(path, client_id, peer_map)
-    httpd = ThreadingHTTPServer((host if host else "0.0.0.0", port), hcls)
+    bind_host = host if host else "0.0.0.0"
+    try:
+        httpd = _ReusableThreadingHTTPServer((bind_host, port), hcls)
+    except OSError as e:
+        py_line(
+            f"bind failed {addr!r} ({bind_host!r}:{port}): {e} — w kontenerze użyj 0.0.0.0:8080; "
+            f"z hosta test: curl -sS -X POST http://127.0.0.1:18080{path} ..."
+        )
+        raise SystemExit(2) from e
     py_line(
         f"pipeline: listen http://{addr}{path} client_id={client_id!r} "
         f"peers={list(peer_map.keys())}"

@@ -3,6 +3,7 @@
  *
  * DEMO_VERBOSE_FRAMEWORK_LOGS — true/1/yes: więcej Microsoft/System.Net.Http/OpenTelemetry;
  *   domyślnie (false) — Warning+ dla frameworka i wyciszenie OTLP HttpClient (info).
+ * DEMO_PROCESS_METRICS — false/0/no/off: nie rejestruj gauge demo.process.* (domyślnie włączone przy OTLP).
  */
 using System.Collections;
 using System.Collections.Generic;
@@ -17,6 +18,8 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using System.Text.Json.Serialization.Metadata;
+using System.Threading;
+using System.Threading.Tasks;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
 using OpenTelemetry;
@@ -31,6 +34,13 @@ namespace OtelDemo;
 public static class Program
 {
     private static readonly ActivitySource Act = new("worker_csharp", "1.0.0");
+    /// <summary>Żyjący uchwyt do bieżącego procesu — nie używamy <c>using</c> na <see cref="Process.GetCurrentProcess"/>,
+    /// bo zwalnianie psuje kolejne odczyty metryk.</summary>
+    private static readonly Process s_metricProcess = Process.GetCurrentProcess();
+    private static readonly object s_cpuGaugeLock = new();
+    private static long s_lastCpuGaugeWallTicks;
+    private static long s_lastCpuGaugeCpuTicks;
+    private static double s_lastPublishedCpuPct;
     private static readonly JsonSerializerOptions s_pipelineJson = new()
     {
         WriteIndented = false,
@@ -91,6 +101,87 @@ public static class Program
         double.TryParse(GetLo("DEMO_MAX_PROCESSING_SEC", "120"), CultureInfo.InvariantCulture, out var x)
             ? x
             : 120.0;
+
+    private static bool ProcessMetricsEnabled()
+    {
+        var v = GetLo("DEMO_PROCESS_METRICS", "true").Trim().ToLowerInvariant();
+        return v is not ("0" or "false" or "no" or "off");
+    }
+
+    /// <summary>Monotonic busy-wait for demo CPU load (replaces Task.Delay for processing simulation).</summary>
+    private static void CpuSpinForSeconds(double seconds)
+    {
+        if (seconds <= 0)
+            return;
+        var sw = Stopwatch.StartNew();
+        long x = 1;
+        while (sw.Elapsed.TotalSeconds < seconds)
+        {
+            for (var i = 0; i < 2048; i++)
+                x = x * 1103515245 + 12345;
+        }
+    }
+
+    private static void RegisterProcessMetrics(Meter m, string serviceName, string clientId)
+    {
+        var tags = new[]
+        {
+            new KeyValuePair<string, object?>("service.name", serviceName),
+            new KeyValuePair<string, object?>("demo.client_id", clientId),
+        };
+
+        m.CreateObservableGauge(
+            "demo.process.cpu.utilization",
+            observeValues: () => new[] { new Measurement<double>(ObserveCpuPercent(), tags) },
+            unit: "%",
+            description: "Process CPU usage 0-100 (wall-normalized)");
+        m.CreateObservableGauge(
+            "demo.process.memory.usage",
+            observeValues: () => new[] { new Measurement<long>(ObserveMemoryBytes(), tags) },
+            unit: "By",
+            description: "Process RSS (working set)");
+    }
+
+    private static double ObserveCpuPercent()
+    {
+        lock (s_cpuGaugeLock)
+        {
+            s_metricProcess.Refresh();
+            var wall = Stopwatch.GetTimestamp();
+            var cpu = s_metricProcess.TotalProcessorTime.Ticks;
+            if (s_lastCpuGaugeWallTicks == 0)
+            {
+                s_lastCpuGaugeWallTicks = wall;
+                s_lastCpuGaugeCpuTicks = cpu;
+                s_lastPublishedCpuPct = 0.0;
+                return 0.0;
+            }
+
+            var dw = wall - s_lastCpuGaugeWallTicks;
+            if (dw <= 0)
+                return s_lastPublishedCpuPct;
+
+            // TotalProcessorTime skokowo; krótkie okno => dc=0 i fałszywe 0%. Czekamy na min. ~100 ms ściany.
+            var wallSec = dw / (double)Stopwatch.Frequency;
+            if (wallSec < 0.1)
+                return s_lastPublishedCpuPct;
+
+            var dc = Math.Max(0L, cpu - s_lastCpuGaugeCpuTicks);
+            s_lastCpuGaugeWallTicks = wall;
+            s_lastCpuGaugeCpuTicks = cpu;
+            var cpuSec = dc / (double)TimeSpan.TicksPerSecond;
+            // Czas CPU procesu / czas ściany * 100 ≈ "% jednego rdzenia" (1 wątek max ~100); clamp jak w planie.
+            var pct = wallSec > 0 ? cpuSec / wallSec * 100.0 : 0.0;
+            s_lastPublishedCpuPct = Math.Clamp(pct, 0.0, 100.0);
+            return s_lastPublishedCpuPct;
+        }
+    }
+
+    private static long ObserveMemoryBytes()
+    {
+        s_metricProcess.Refresh();
+        return s_metricProcess.WorkingSet64;
+    }
 
     private static Dictionary<string, string> LoadPeerMap()
     {
@@ -251,6 +342,13 @@ public static class Program
             return;
         }
 
+        // Obraz aspnet ustawia ASPNETCORE_HTTP_PORTS; host musi wczytać ASPNETCORE_URLS przed CreateBuilder,
+        // inaczej Kestrel może nie nasłuchiwać na DEMO_HTTP_ADDR (pusty port / zły port względem DEMO_PEER_*).
+        var bindUrls = GetLo("DEMO_HTTP_ADDR", "0.0.0.0:8080").Trim();
+        if (!bindUrls.StartsWith("http", StringComparison.OrdinalIgnoreCase))
+            bindUrls = "http://" + bindUrls;
+        Environment.SetEnvironmentVariable("ASPNETCORE_URLS", bindUrls);
+
         // W3C traceparent — inbound Activity + outbound HttpClient używają tego samego co inne workery.
         Sdk.SetDefaultTextMapPropagator(new TraceContextPropagator());
 
@@ -285,11 +383,7 @@ public static class Program
 
         builder.Services.AddHttpClient();
 
-        var l = GetLo("DEMO_HTTP_ADDR", "0.0.0.0:8080");
-        if (!l.StartsWith("http", StringComparison.OrdinalIgnoreCase))
-            l = "http://" + l;
-
-        builder.WebHost.UseUrls(l);
+        builder.WebHost.UseUrls(bindUrls);
 
         var pipelinePath = GetLo("DEMO_HTTP_PATH", "/v1/pipeline");
 
@@ -363,8 +457,13 @@ public static class Program
         var msgCount = m.CreateCounter<long>("demo.pipeline.messages", description: "messages processed in node");
         var hopDuration = m.CreateHistogram<double>("demo.pipeline.hop.duration_ms", description: "hop time ms", unit: "ms");
 
+        var otelSvc = Environment.GetEnvironmentVariable("OTEL_SERVICE_NAME")?.Trim();
+        var svcMetrics = string.IsNullOrEmpty(otelSvc) ? "worker_csharp" : otelSvc;
+        if (UseOtlp() && ProcessMetricsEnabled())
+            RegisterProcessMetrics(m, svcMetrics, cid);
+
         app.Lifetime.ApplicationStarted.Register(
-            () => CsLine($"C# pipeline {l}{path} client_id={cid} peers=[{string.Join(",", peers.Keys)}]"));
+            () => CsLine($"C# pipeline {bindUrls}{path} client_id={cid} peers=[{string.Join(",", peers.Keys)}]"));
 
         app.MapPost(
             path,
@@ -473,10 +572,10 @@ public static class Program
                     using (Act.StartActivity(name, ActivityKind.Internal))
                     {
                         Activity.Current?.SetTag("demo.activity", act);
-                        Activity.Current?.SetTag("demo.sleep_sec", sec);
+                        Activity.Current?.SetTag("demo.cpu_spin_sec", sec);
                         Activity.Current?.SetTag("demo.step_index", i);
                         if (sec > 0)
-                            await Task.Delay(TimeSpan.FromSeconds(sec));
+                            await Task.Run(() => CpuSpinForSeconds(sec));
                     }
                 }
             }
@@ -495,8 +594,8 @@ public static class Program
                 {
                     using (Act.StartActivity("pipeline.simulated_work", ActivityKind.Internal))
                     {
-                        Activity.Current?.SetTag("demo.sleep_sec", sleepSec);
-                        await Task.Delay(TimeSpan.FromSeconds(sleepSec));
+                        Activity.Current?.SetTag("demo.cpu_spin_sec", sleepSec);
+                        await Task.Run(() => CpuSpinForSeconds(sleepSec));
                     }
                 }
             }
