@@ -4,10 +4,24 @@ datasources:
     type: prometheus
     access: proxy
     orgId: 1
+    uid: prometheus
     url: http://prometheus:9090
     isDefault: true
     jsonData:
       timeInterval: 5s
+  # Grafana Traces Drilldown (self-managed ≥11.6) — tylko Tempo; Jaeger nie wypełnia tego widoku.
+  - name: Tempo
+    type: tempo
+    access: proxy
+    orgId: 1
+    uid: tempo
+    url: http://tempo:3200
+    jsonData:
+      httpMethod: GET
+      tracesToMetrics:
+        datasourceUid: prometheus
+      serviceMap:
+        datasourceUid: prometheus
   - name: Jaeger
     type: jaeger
     access: proxy

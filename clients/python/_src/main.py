@@ -398,6 +398,7 @@ def _make_handler(
 
             with tr.start_as_current_span(
                 "pipeline.hop",
+                kind=trace.SpanKind.SERVER,
                 attributes={
                     "demo.client_id": client_id,
                 },

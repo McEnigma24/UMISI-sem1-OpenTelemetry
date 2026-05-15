@@ -1,4 +1,4 @@
-#   docker compose logs -f otel          # trace’y z `debug` + eksport do Jaegera
+#   docker compose logs -f otel          # trace’y z `debug` + eksport do Jaegera + Tempo (Grafana Drilldown)
 #   docker compose up --scale gateway-python=2
 #   docker compose up otel               # sam Collector, klient ręcznie z hosta
 #
@@ -6,6 +6,7 @@
 # w dokumentacji. Docker Hardened Images (dhi/...) pod FIPS/CIS, na lokalne demo zwykle niepotrzebne.
 #
 # UI: Jaeger http://localhost:16686  |  Prometheus http://localhost:9090  |  Grafana http://localhost:3000 (admin/admin)
+# Trace’y w Grafanie (Drilldown / Explore): wybierz datasource **Tempo** — Jaeger UI nadal pod :16686.
 #
 # HTTP pipeline: niepusty JSON ``route`` + DEMO_PEER_* (mapa hopów). Z hosta gateway: http://127.0.0.1:18080
 # (POST /v1/pipeline; ``localhost`` bywa IPv6 — lepiej 127.0.0.1). Diagnoza: ``docker compose ps``, logi
@@ -21,6 +22,27 @@ services:
     environment:
       COLLECTOR_OTLP_ENABLED: "true"
 
+  # Tempo: backend pod Grafana „Drilldown / Traces” (Jaeger datasource tego nie obsługuje).
+  tempo-init:
+    image: busybox:1.36
+    user: root
+    volumes:
+      - tempo-data:/var/tempo
+    entrypoint:
+      - /bin/sh
+      - -c
+      - chown -R 10001:10001 /var/tempo
+
+  tempo:
+    image: grafana/tempo:2.6.1
+    command: ["-config.file=/etc/tempo.yaml"]
+    volumes:
+      - ./server/tempo/tempo.yaml:/etc/tempo.yaml:ro
+      - tempo-data:/var/tempo
+    depends_on:
+      tempo-init:
+        condition: service_completed_successfully
+
   otel:
     build:
       context: ./server/otel
@@ -32,11 +54,15 @@ services:
     depends_on:
       jaeger:
         condition: service_started
+      tempo:
+        condition: service_started
 
   prometheus:
     image: prom/prometheus:latest
     command:
       - --config.file=/etc/prometheus/prometheus.yml
+      # Tempo metrics_generator (span metrics) → remote_write; bez tego TraceQL ``| rate()`` w Drilldown → „empty ring”
+      - --web.enable-remote-write-receiver
     volumes:
       - ./server/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
     ports:
@@ -57,6 +83,7 @@ services:
     depends_on:
       - prometheus
       - jaeger
+      - tempo
 
   # workers #
   # client-cpp:
@@ -219,3 +246,8 @@ services:
 #     - /bin/sh
 #     - -c
 #     - "sleep 2 && exec python _src/main.py"
+
+# Named volume tempo-data: trwałość bloków trace’ów Tempo (WAL) między restartami kontenera.
+# Usuń dane tylko celowo: docker compose down -v  (flaga -v kasuje named volumes).
+volumes:
+  tempo-data:

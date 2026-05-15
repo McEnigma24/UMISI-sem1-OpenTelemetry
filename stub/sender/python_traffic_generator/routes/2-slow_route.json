@@ -1,0 +1,24 @@
+{
+  "route": [
+    {
+      "id": "py", "visited": false, "processing_steps": [
+        { "activity": "A", "time": "0.67s" },
+        { "activity": "B", "time": "0.68s" },
+        { "activity": "C", "time": "0.69s" }
+      ]
+    },
+    { "id": "rs", "visited": false, "processing_steps": [
+        { "activity": "A", "time": "0.67s" },
+        { "activity": "B", "time": "10.68s" },
+        { "activity": "C", "time": "0.69s" }
+      ] },
+    { "id": "cs", "visited": false, "processing_steps": [
+        { "activity": "A", "time": "0.67s" },
+        { "activity": "B", "time": "0.68s" },
+        { "activity": "C", "time": "0.69s" }
+      ] }
+  ],
+  "visit_log": [],
+  "counter": "0",
+  "table_of_clients": []
+}

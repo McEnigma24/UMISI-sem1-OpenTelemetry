@@ -18,6 +18,7 @@ use axum::Router;
 use opentelemetry::metrics::{Counter, Histogram};
 use opentelemetry::global;
 use opentelemetry::trace::FutureExt;
+use opentelemetry::trace::SpanKind;
 use opentelemetry::trace::TraceContextExt;
 use opentelemetry::trace::Tracer;
 use opentelemetry::trace::Span;
@@ -477,7 +478,10 @@ async fn route_mode(st: &St, parent: &Context, mut m: PipelineMsg) -> Response {
         Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
     };
 
-    let hop = t.start_with_context("pipeline.hop", parent);
+    let hop = t
+        .span_builder("pipeline.hop")
+        .with_kind(SpanKind::Server)
+        .start_with_context(&t, parent);
     let hop_cx = parent.clone().with_span(hop);
 
     match &plan {
@@ -549,7 +553,10 @@ async fn route_mode(st: &St, parent: &Context, mut m: PipelineMsg) -> Response {
             st.id,
             String::from_utf8_lossy(&body_vec)
         ));
-        let forward = t.start_with_context("pipeline.forward", &hop_cx);
+        let forward = t
+            .span_builder("pipeline.forward")
+            .with_kind(SpanKind::Client)
+            .start_with_context(&t, &hop_cx);
         let forward_cx = hop_cx.clone().with_span(forward);
         let mut hmap = http::HeaderMap::new();
         global::get_text_map_propagator(|p| {

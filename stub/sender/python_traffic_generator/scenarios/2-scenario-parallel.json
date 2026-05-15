@@ -13,6 +13,16 @@
         "mode": "parallel",
         "payload_files": ["1-route.json", "1-route.json", "1-route.json"]
       }
+    },
+    {
+      "name": "parallel_burst",
+      "initial_delay_sec": 30,
+      "periodicity": 15,
+      "repetitions": 300,
+      "send": {
+        "mode": "parallel",
+        "payload_files": ["2-slow_route.json"]
+      }
     }
   ]
 }

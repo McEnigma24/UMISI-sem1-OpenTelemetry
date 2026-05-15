@@ -1,4 +1,4 @@
-# OpenTelemetry Collector (contrib) — OTLP, trace’y: Jaeger (OTLP) + logi: debug; metryki: endpoint do scrapu Prometheusa
+# OpenTelemetry Collector (contrib) — OTLP, trace’y: Jaeger + Tempo (OTLP) + logi: debug; metryki: otel:8889
 # Klienci: 4317 gRPC, 4318 HTTP. Prometheus w Compose skrapuje: otel:8889
 receivers:
   otlp:
@@ -19,6 +19,11 @@ exporters:
     endpoint: jaeger:4317
     tls:
       insecure: true
+  # Grafana „Drilldown / Traces” wymaga Tempo — Jaeger zostaje do UI http://localhost:16686
+  otlp/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
   prometheus:
     endpoint: 0.0.0.0:8889
 
@@ -27,7 +32,7 @@ service:
     traces:
       receivers: [otlp]
       processors: [batch]
-      exporters: [debug, otlp/jaeger]
+      exporters: [debug, otlp/jaeger, otlp/tempo]
     metrics:
       receivers: [otlp]
       processors: [batch]
