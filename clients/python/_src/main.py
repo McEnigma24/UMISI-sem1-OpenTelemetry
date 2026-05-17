@@ -15,6 +15,8 @@ Demo ENV:
   DEMO_PEER_PY, DEMO_PEER_RS, DEMO_PEER_CS — URL pełny do pipeline (lub DEMO_PEER_MAP jako JSON obiekt id->url)
   DEMO_MAX_PROCESSING_SEC — limit czasu symulacji CPU (domyślnie 120)
   DEMO_PROCESS_METRICS — false/0: bez gauge'y demo.process.* (domyślnie włączone; punkty mają service.name + demo.client_id)
+  PYROSCOPE_SERVER — np. ``http://pyroscope:4040`` → continuous profiling (stosy CPU) do Grafana Pyroscope; osobno od OTLP metryk.
+  PYROSCOPE_ENABLED — false/0: nie startuj ``pyroscope-io`` mimo ustawionego ``PYROSCOPE_SERVER``.
 """
 from __future__ import annotations
 
@@ -109,6 +111,40 @@ def _use_otlp_http() -> bool:
 def _process_metrics_enabled() -> bool:
     v = os.environ.get("DEMO_PROCESS_METRICS", "true").strip().lower()
     return v not in ("0", "false", "no", "off")
+
+
+def _pyroscope_push_enabled() -> bool:
+    v = os.environ.get("PYROSCOPE_ENABLED", "true").strip().lower()
+    if v in ("0", "false", "no", "off"):
+        return False
+    return bool(os.environ.get("PYROSCOPE_SERVER", "").strip())
+
+
+def _init_pyroscope_push() -> None:
+    """Continuous profiling → Pyroscope (Grafana Drilldown Profiles). Osobno od OTLP metryk ``demo.process.*``."""
+    if not _pyroscope_push_enabled():
+        return
+    try:
+        import pyroscope
+    except ImportError:
+        py_line("PYROSCOPE_SERVER set but pyroscope-io missing — rebuild image (requirements.txt)")
+        return
+    server = os.environ.get("PYROSCOPE_SERVER", "").strip()
+    app_name = (os.environ.get("OTEL_SERVICE_NAME") or "").strip() or "gateway_python"
+    cid = (os.environ.get("DEMO_CLIENT_ID") or "py").strip() or "py"
+    env = os.environ.get("OTEL_ENVIRONMENT") or os.environ.get(
+        "DEPLOYMENT_ENVIRONMENT", "local"
+    )
+    pyroscope.configure(
+        application_name=app_name,
+        server_address=server,
+        tags={
+            "service.name": app_name,
+            "demo.client_id": cid,
+            "deployment.environment": env,
+        },
+    )
+    py_line(f"Pyroscope push profiler: server={server!r} application_name={app_name!r}")
 
 
 def _process_metric_point_attributes() -> dict[str, str]:

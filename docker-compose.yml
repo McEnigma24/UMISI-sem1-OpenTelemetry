@@ -6,7 +6,11 @@
 # w dokumentacji. Docker Hardened Images (dhi/...) pod FIPS/CIS, na lokalne demo zwykle niepotrzebne.
 #
 # UI: Jaeger http://localhost:16686  |  Prometheus http://localhost:9090  |  Grafana http://localhost:3000 (admin/admin)
+#       Pyroscope http://localhost:4040  — profiling pod Trace→profiles / flame graph w szczegółach spanu (wymaga pyroscope.profile.id na spanach).
 # Trace’y w Grafanie (Drilldown / Explore): wybierz datasource **Tempo** — Jaeger UI nadal pod :16686.
+# Ten sam ``trace_id`` trafia do Jaegera i Tempo (Collector → oba). Porównanie dwóch trace’ów jak w Jaegerze „Compare”:
+#   Jaeger UI → Search → wybierz trace A → Compare → wklej ID trace B. W Grafanie brak natywnego diffu dwóch ID —
+#   Explore → ikona split → w każdym panelu Tempo i inne ``trace_id``; wizualnie porównujesz waterfall/minimapę.
 #
 # HTTP pipeline: niepusty JSON ``route`` + DEMO_PEER_* (mapa hopów). Z hosta gateway: http://127.0.0.1:18080
 # (POST /v1/pipeline; ``localhost`` bywa IPv6 — lepiej 127.0.0.1). Diagnoza: ``docker compose ps``, logi
@@ -71,6 +75,18 @@ services:
       otel:
         condition: service_started
 
+  # Profiling (Grafana Pyroscope). To NIE jest porównanie dwóch trace’ów po trace_id:
+  #   Drilldown „Profiles / Diff flame graph” = dwa zakresy czasu tego samego typu profilu (CPU itd.) dla wybranej
+  #   usługi z danych w Pyroscope — bez profili z waszych kontenerów zobaczycie głównie serwis „pyroscope” (sam serwer
+  #   Go: goroutines itd.), a nie gateway_python/worker_*.
+  # Trace’y idą do Tempo (OTLP) — Pyroscope ich nie widzi, dopóki aplikacje nie wysyłają continuous profiling + ewent.
+  # powiązania span↔profil (pyroscope.profile.id). Dok.: https://grafana.com/docs/pyroscope/latest/configure-client/
+  pyroscope:
+    image: grafana/pyroscope:latest
+    ports:
+      - "4040:4040"
+    # Brak wolumenu: demo; profile znikają po restarcie kontenera.
+
   grafana:
     image: grafana/grafana:latest
     ports:
@@ -78,12 +94,16 @@ services:
     environment:
       GF_SECURITY_ADMIN_USER: admin
       GF_SECURITY_ADMIN_PASSWORD: admin
+      # Trace → profile: przycisk „Profiles for this span” + tracesEmbeddedFlameGraph (szczegóły spanu).
+      # Lista: https://grafana.com/docs/grafana/latest/setup-grafana/configure-grafana/feature-toggles/
+      GF_FEATURE_TOGGLES_ENABLE: traceToProfiles tracesEmbeddedFlameGraph
     volumes:
       - ./server/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
     depends_on:
       - prometheus
       - jaeger
       - tempo
+      - pyroscope
 
   # workers #
   # client-cpp:

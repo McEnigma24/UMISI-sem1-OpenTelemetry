@@ -10,6 +10,17 @@ datasources:
     jsonData:
       timeInterval: 5s
   # Grafana Traces Drilldown (self-managed ≥11.6) — tylko Tempo; Jaeger nie wypełnia tego widoku.
+  # Musi być ``grafana-pyroscope-datasource`` (id pluginu), nie ``grafana-pyroscope`` — inaczej Explore bywa puste / wraca do innego DS.
+  - name: Grafana Pyroscope
+    type: grafana-pyroscope-datasource
+    access: proxy
+    orgId: 1
+    uid: pyroscope
+    url: http://pyroscope:4040
+    isDefault: false
+    jsonData:
+      minStep: "15s"
+
   - name: Tempo
     type: tempo
     access: proxy
@@ -22,6 +33,12 @@ datasources:
         datasourceUid: prometheus
       serviceMap:
         datasourceUid: prometheus
+      # Wymaga na spanach atrybutu pyroscope.profile.id (OTel span profiling bridge) — wtedy flame graph w szczegółach.
+      tracesToProfiles:
+        datasourceUid: pyroscope
+        tags:
+          - key: service.name
+        profileTypeId: process_cpu:cpu:nanoseconds:cpu:nanoseconds
   - name: Jaeger
     type: jaeger
     access: proxy
