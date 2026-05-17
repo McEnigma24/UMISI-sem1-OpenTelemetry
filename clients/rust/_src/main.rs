@@ -662,7 +662,9 @@ fn maybe_start_pyroscope_push() {
                 return;
             }
         };
-        eprintln!("Pyroscope push profiler: server={server} application_name={app_name}");
+        eprintln!(
+            "Pyroscope push profiler: server='{server}' application_name='{app_name}'"
+        );
         thread::park();
     });
 }

@@ -4,6 +4,8 @@
  * DEMO_VERBOSE_FRAMEWORK_LOGS — true/1/yes: więcej Microsoft/System.Net.Http/OpenTelemetry;
  *   domyślnie (false) — Warning+ dla frameworka i wyciszenie OTLP HttpClient (info).
  * DEMO_PROCESS_METRICS — false/0/no/off: nie rejestruj gauge demo.process.* (domyślnie włączone przy OTLP).
+ * PYROSCOPE_SERVER + PYROSCOPE_ENABLED — ten sam komunikat „Pyroscope push profiler” co Python/Rust
+ *   (push profili CPU w Pyroscope tylko tam; natywny CorProfiler .NET wyłączony — zalewa ``docker compose logs``).
  */
 using System.Collections;
 using System.Collections.Generic;
@@ -48,6 +50,26 @@ public static class Program
     };
 
     private static void CsLine(string m) => Console.WriteLine($"{DateTime.Now:HH:mm:ss.fff} {m}");
+
+    private static bool PyroscopePushLogLineEnabled()
+    {
+        var v = GetLo("PYROSCOPE_ENABLED", "true").Trim();
+        if (v is "0" or "false" or "no" or "off")
+            return false;
+        return GetLo("PYROSCOPE_SERVER", "").Trim().Length > 0;
+    }
+
+    // Ten sam tekst co Python/Rust; push CPU do Pyroscope w .NET = natywny CorProfiler (wyłączony w tym demo).
+    private static void LogPyroscopePushLineIfConfigured()
+    {
+        if (!PyroscopePushLogLineEnabled())
+            return;
+        var server = GetLo("PYROSCOPE_SERVER", "").Trim();
+        var app = GetLo("OTEL_SERVICE_NAME", "").Trim();
+        if (app.Length == 0)
+            app = "worker_csharp";
+        CsLine($"Pyroscope push profiler: server='{server}' application_name='{app}'");
+    }
 
     private static string NodeToJsonString(JsonNode? node) =>
         node is null ? "{}" : JsonSerializer.Serialize(node, s_pipelineJson);
@@ -348,6 +370,8 @@ public static class Program
         if (!bindUrls.StartsWith("http", StringComparison.OrdinalIgnoreCase))
             bindUrls = "http://" + bindUrls;
         Environment.SetEnvironmentVariable("ASPNETCORE_URLS", bindUrls);
+
+        LogPyroscopePushLineIfConfigured();
 
         // W3C traceparent — inbound Activity + outbound HttpClient używają tego samego co inne workery.
         Sdk.SetDefaultTextMapPropagator(new TraceContextPropagator());

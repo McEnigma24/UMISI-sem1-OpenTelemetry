@@ -16,7 +16,7 @@
 # HTTP pipeline: niepusty JSON ``route`` + DEMO_PEER_* (mapa hopów). Z hosta gateway: http://127.0.0.1:18080
 # (POST /v1/pipeline; ``localhost`` bywa IPv6 — lepiej 127.0.0.1). Diagnoza: ``docker compose ps``, logi
 # ``gateway-python`` / ``client-csharp`` / ``client-rust``; pierwsze sekundy po starcie workery mogą jeszcze nie forwardować.
-# ``client-csharp``: ``platform: linux/amd64`` — profiler .NET tylko x86_64; w compose: ``DD_TRACE_DEBUG=false`` + katalog logów profilera, żeby ograniczyć szum w ``docker compose logs``.
+# Pyroscope push (log startowy ten sam): Python ``pyroscope-io``, Rust ``pyroscope``; C# bez natywnego CorProfilera (szum w ``docker compose logs``) — tylko spójny komunikat + ``PYROSCOPE_SERVER``.
 # Stub traffic_generator: compose lub ręcznie: cd stub/sender/python_traffic_generator && ./docker_run.sh
 #
 services:
@@ -160,10 +160,8 @@ services:
       pyroscope:
         condition: service_started
 
-  # C#: profiler Pyroscope (.NET) — natywne .so z Dockerfile + zmienne z dokumentacji Grafana.
-  # Wymaga Linux/amd64 (na ARM włączamy emulację przez platform poniżej).
+  # C#: ten sam komunikat „Pyroscope push profiler” co Python/Rust (``PYROSCOPE_SERVER``); bez natywnego profilera .NET.
   client-csharp:
-    platform: linux/amd64
     build:
       context: ./clients/csharp
     image: client_csharp
@@ -181,27 +179,7 @@ services:
       DEMO_PEER_PY: http://gateway-python:8080/v1/pipeline
       DEMO_PEER_RS: http://client-rust:8080/v1/pipeline
       DEMO_PEER_CS: http://client-csharp:8080/v1/pipeline
-      # Pyroscope .NET (native): mniej szumu niż domyślny „dev”; CPU przez timer_create — komunikat
-      # „StackSamplerLoopManager … cpu & wall disabled” jest normalny przy wył. wall time.
-      PYROSCOPE_APPLICATION_NAME: worker_csharp
-      PYROSCOPE_SERVER_ADDRESS: http://pyroscope:4040
-      PYROSCOPE_PROFILING_ENABLED: "true"
-      PYROSCOPE_PROFILING_CPU_ENABLED: "true"
-      PYROSCOPE_PROFILING_WALLTIME_ENABLED: "false"
-      PYROSCOPE_PROFILING_LOG_DIR: /var/log/pyroscope/dotnet
-      DD_TRACE_DEBUG: "false"
-      DD_INTERNAL_USE_DEVELOPMENT_CONFIGURATION: "false"
-      DD_TRACE_LOG_DIRECTORY: /var/log/pyroscope/dotnet
-      DD_PROFILING_CPU_ENABLED: "true"
-      DD_PROFILING_UPLOAD_PERIOD: "10"
-      CORECLR_ENABLE_PROFILING: "1"
-      CORECLR_PROFILER: "{BD1A650D-AC5D-4896-B64F-D6FA25D6B26A}"
-      CORECLR_PROFILER_PATH: /dotnet/Pyroscope.Profiler.Native.so
-      LD_PRELOAD: /dotnet/Pyroscope.Linux.ApiWrapper.x64.so
-      DOTNET_EnableDiagnostics: "1"
-      DOTNET_EnableDiagnostics_IPC: "0"
-      DOTNET_EnableDiagnostics_Debugger: "0"
-      DOTNET_EnableDiagnostics_Profiler: "1"
+      PYROSCOPE_SERVER: http://pyroscope:4040
     depends_on:
       otel:
         condition: service_started

@@ -144,7 +144,9 @@ def _init_pyroscope_push() -> None:
             "deployment.environment": env,
         },
     )
-    py_line(f"Pyroscope push profiler: server={server!r} application_name={app_name!r}")
+    py_line(
+        f"Pyroscope push profiler: server='{server}' application_name='{app_name}'"
+    )
 
 
 def _process_metric_point_attributes() -> dict[str, str]:
