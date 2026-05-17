@@ -5,7 +5,8 @@
 # Obrazy: oficjalne (grafana/grafana, prom/prometheus, jaegertracing/all-in-one) — dobre wsparcie
 # w dokumentacji. Docker Hardened Images (dhi/...) pod FIPS/CIS, na lokalne demo zwykle niepotrzebne.
 #
-# UI: Jaeger http://localhost:16686  |  Prometheus http://localhost:9090  |  Grafana http://localhost:3000 (admin/admin)
+# UI: Jaeger http://localhost:16686  |  Prometheus http://localhost:9090  |  Grafana http://localhost:3000
+#       (lokalne demo: Grafana z anonimowym Admin — bez logowania; nie wystawiaj portu 3000 na internet).
 #       Pyroscope http://localhost:4040  — profiling pod Trace→profiles / flame graph w szczegółach spanu (wymaga pyroscope.profile.id na spanach).
 # Trace’y w Grafanie (Drilldown / Explore): wybierz datasource **Tempo** — Jaeger UI nadal pod :16686.
 # Ten sam ``trace_id`` trafia do Jaegera i Tempo (Collector → oba). Porównanie dwóch trace’ów jak w Jaegerze „Compare”:
@@ -15,6 +16,7 @@
 # HTTP pipeline: niepusty JSON ``route`` + DEMO_PEER_* (mapa hopów). Z hosta gateway: http://127.0.0.1:18080
 # (POST /v1/pipeline; ``localhost`` bywa IPv6 — lepiej 127.0.0.1). Diagnoza: ``docker compose ps``, logi
 # ``gateway-python`` / ``client-csharp`` / ``client-rust``; pierwsze sekundy po starcie workery mogą jeszcze nie forwardować.
+# ``client-csharp``: ``platform: linux/amd64`` — profiler .NET tylko x86_64; w compose: ``DD_TRACE_DEBUG=false`` + katalog logów profilera, żeby ograniczyć szum w ``docker compose logs``.
 # Stub traffic_generator: compose lub ręcznie: cd stub/sender/python_traffic_generator && ./docker_run.sh
 #
 services:
@@ -75,12 +77,10 @@ services:
       otel:
         condition: service_started
 
-  # Profiling (Grafana Pyroscope). To NIE jest porównanie dwóch trace’ów po trace_id:
-  #   Drilldown „Profiles / Diff flame graph” = dwa zakresy czasu tego samego typu profilu (CPU itd.) dla wybranej
-  #   usługi z danych w Pyroscope — bez profili z waszych kontenerów zobaczycie głównie serwis „pyroscope” (sam serwer
-  #   Go: goroutines itd.), a nie gateway_python/worker_*.
-  # Trace’y idą do Tempo (OTLP) — Pyroscope ich nie widzi, dopóki aplikacje nie wysyłają continuous profiling + ewent.
-  # powiązania span↔profil (pyroscope.profile.id). Dok.: https://grafana.com/docs/pyroscope/latest/configure-client/
+  # Profiling (Grafana Pyroscope). Drilldown „Profiles / Diff flame graph” = dwa zakresy czasu profilu CPU
+  #   (continuous profiling), nie porównanie dwóch trace_id. ``gateway-python`` i ``client-rust`` wysyłają push
+  #   profili (PYROSCOPE_SERVER); C# — tylko OTLP w tym repo. Trace→span profil: ``pyroscope.profile.id`` osobno.
+  # Dok.: https://grafana.com/docs/pyroscope/latest/configure-client/
   pyroscope:
     image: grafana/pyroscope:latest
     ports:
@@ -94,6 +94,10 @@ services:
     environment:
       GF_SECURITY_ADMIN_USER: admin
       GF_SECURITY_ADMIN_PASSWORD: admin
+      # Lokalne demo: wejście bez formularza logowania (anon = Admin). Produkcja: usuń te trzy + dodaj auth.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
       # Trace → profile: przycisk „Profiles for this span” + tracesEmbeddedFlameGraph (szczegóły spanu).
       # Lista: https://grafana.com/docs/grafana/latest/setup-grafana/configure-grafana/feature-toggles/
       GF_FEATURE_TOGGLES_ENABLE: traceToProfiles tracesEmbeddedFlameGraph
@@ -148,11 +152,18 @@ services:
       DEMO_PEER_PY: http://gateway-python:8080/v1/pipeline
       DEMO_PEER_RS: http://client-rust:8080/v1/pipeline
       DEMO_PEER_CS: http://client-csharp:8080/v1/pipeline
+      OTEL_SERVICE_NAME: worker_rust
+      PYROSCOPE_SERVER: http://pyroscope:4040
     depends_on:
       otel:
         condition: service_started
+      pyroscope:
+        condition: service_started
 
+  # C#: profiler Pyroscope (.NET) — natywne .so z Dockerfile + zmienne z dokumentacji Grafana.
+  # Wymaga Linux/amd64 (na ARM włączamy emulację przez platform poniżej).
   client-csharp:
+    platform: linux/amd64
     build:
       context: ./clients/csharp
     image: client_csharp
@@ -163,14 +174,38 @@ services:
       OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: http://otel:4318/v1/metrics
       OTEL_ENVIRONMENT: local
       OTEL_DEMO_RESOURCE_TAG: lang-csharp
+      OTEL_SERVICE_NAME: worker_csharp
       DEMO_HTTP_ADDR: 0.0.0.0:8080
       DEMO_HTTP_PATH: /v1/pipeline
       DEMO_CLIENT_ID: cs
       DEMO_PEER_PY: http://gateway-python:8080/v1/pipeline
       DEMO_PEER_RS: http://client-rust:8080/v1/pipeline
       DEMO_PEER_CS: http://client-csharp:8080/v1/pipeline
+      # Pyroscope .NET (native): mniej szumu niż domyślny „dev”; CPU przez timer_create — komunikat
+      # „StackSamplerLoopManager … cpu & wall disabled” jest normalny przy wył. wall time.
+      PYROSCOPE_APPLICATION_NAME: worker_csharp
+      PYROSCOPE_SERVER_ADDRESS: http://pyroscope:4040
+      PYROSCOPE_PROFILING_ENABLED: "true"
+      PYROSCOPE_PROFILING_CPU_ENABLED: "true"
+      PYROSCOPE_PROFILING_WALLTIME_ENABLED: "false"
+      PYROSCOPE_PROFILING_LOG_DIR: /var/log/pyroscope/dotnet
+      DD_TRACE_DEBUG: "false"
+      DD_INTERNAL_USE_DEVELOPMENT_CONFIGURATION: "false"
+      DD_TRACE_LOG_DIRECTORY: /var/log/pyroscope/dotnet
+      DD_PROFILING_CPU_ENABLED: "true"
+      DD_PROFILING_UPLOAD_PERIOD: "10"
+      CORECLR_ENABLE_PROFILING: "1"
+      CORECLR_PROFILER: "{BD1A650D-AC5D-4896-B64F-D6FA25D6B26A}"
+      CORECLR_PROFILER_PATH: /dotnet/Pyroscope.Profiler.Native.so
+      LD_PRELOAD: /dotnet/Pyroscope.Linux.ApiWrapper.x64.so
+      DOTNET_EnableDiagnostics: "1"
+      DOTNET_EnableDiagnostics_IPC: "0"
+      DOTNET_EnableDiagnostics_Debugger: "0"
+      DOTNET_EnableDiagnostics_Profiler: "1"
     depends_on:
       otel:
+        condition: service_started
+      pyroscope:
         condition: service_started
 
   # API gateway #
@@ -193,10 +228,13 @@ services:
       DEMO_PEER_PY: http://gateway-python:8080/v1/pipeline
       DEMO_PEER_RS: http://client-rust:8080/v1/pipeline
       DEMO_PEER_CS: http://client-csharp:8080/v1/pipeline
+      OTEL_SERVICE_NAME: gateway_python
+      PYROSCOPE_SERVER: http://pyroscope:4040
     depends_on:
       otel:
         condition: service_started
-      # Workery startują równolegle; gateway nasłuchuje bez czekania na ich bind (Compose „started” ≠ port gotowy).
+      pyroscope:
+        condition: service_started
     healthcheck:
       test:
         [
@@ -267,7 +305,6 @@ services:
 #     - -c
 #     - "sleep 2 && exec python _src/main.py"
 
-# Named volume tempo-data: trwałość bloków trace’ów Tempo (WAL) między restartami kontenera.
-# Usuń dane tylko celowo: docker compose down -v  (flaga -v kasuje named volumes).
+
 volumes:
   tempo-data:

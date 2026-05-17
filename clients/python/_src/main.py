@@ -563,6 +563,7 @@ def run_server() -> None:
     provider = _init_telemetry()
     if _TRACER is None:
         raise SystemExit(1)
+    _init_pyroscope_push()
     hcls = _make_handler(path, client_id, peer_map)
     bind_host = host if host else "0.0.0.0"
     try:

@@ -1,6 +1,7 @@
 //! HTTP pipeline (Rust) — W3C propagate, forward, opcjonalna trasa `route` w JSON.
 //! Segment: `processing_time` (legacy) albo niepusta `processing_steps`: `[{ "activity", "time" }, …]`
 //! (spany `pipeline.processing` + podspany wg `activity`, jeden trace).
+//! Continuous profiling: ustaw ``PYROSCOPE_SERVER`` (np. ``http://pyroscope:4040``) — osobno od OTLP.
 use std::collections::HashMap;
 use std::env;
 use std::net::SocketAddr;
@@ -614,6 +615,58 @@ async fn route_mode(st: &St, parent: &Context, mut m: PipelineMsg) -> Response {
         .unwrap_or_else(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response())
 }
 
+/// Continuous profiling → Pyroscope (osobno od OTLP metryk). ``PYROSCOPE_SERVER`` ustawiony i niepusty.
+fn maybe_start_pyroscope_push() {
+    use std::thread;
+
+    let en = env::var("PYROSCOPE_ENABLED").unwrap_or_else(|_| "true".to_string());
+    let el = en.to_lowercase();
+    if matches!(el.as_str(), "0" | "false" | "no" | "off") {
+        return;
+    }
+    let server = match env::var("PYROSCOPE_SERVER") {
+        Ok(s) if !s.trim().is_empty() => s,
+        _ => return,
+    };
+    let app_name = env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| "worker_rust".to_string());
+    let client_id = env::var("DEMO_CLIENT_ID").unwrap_or_else(|_| "rs".to_string());
+    thread::spawn(move || {
+        use pyroscope::backend::{pprof_backend, BackendConfig, PprofConfig};
+        use pyroscope::pyroscope::PyroscopeAgentBuilder;
+
+        let backend = pprof_backend(PprofConfig::default(), BackendConfig::default());
+        let agent = match PyroscopeAgentBuilder::new(
+            server.as_str(),
+            app_name.as_str(),
+            100u32,
+            "pyroscope-rs",
+            env!("CARGO_PKG_VERSION"),
+            backend,
+        )
+        .tags(vec![
+            ("service.name", app_name.as_str()),
+            ("demo.client_id", client_id.as_str()),
+        ])
+        .build()
+        {
+            Ok(a) => a,
+            Err(e) => {
+                eprintln!("pyroscope build: {e}");
+                return;
+            }
+        };
+        let _pyroscope_guard = match agent.start() {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("pyroscope start: {e}");
+                return;
+            }
+        };
+        eprintln!("Pyroscope push profiler: server={server} application_name={app_name}");
+        thread::park();
+    });
+}
+
 #[tokio::main]
 async fn main() {
     if env::var("DEMO_MODE")
@@ -651,6 +704,7 @@ async fn main() {
         .with_description("Liczba przetworzonych wiadomości w węźle")
         .build();
     register_process_metrics(&meter);
+    maybe_start_pyroscope_push();
     let peers = match load_peer_map() {
         Ok(m) => m,
         Err(e) => {

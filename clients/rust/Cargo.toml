@@ -16,6 +16,7 @@ opentelemetry-semantic-conventions = "0.29"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "http2"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = [] }
+pyroscope = { version = "2.0.1", features = ["backend-pprof-rs"] }
 sysinfo = "0.31"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
 uuid = { version = "1", features = ["v4"] }
