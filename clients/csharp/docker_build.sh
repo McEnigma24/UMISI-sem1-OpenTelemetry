@@ -1,4 +1,20 @@
 #!/bin/bash
-docker build -t client_csharp .
+set -euo pipefail
+img_name="builder"
+
+docker build --target "$img_name" -t "client_csharp-$img_name" .
 
 docker image prune -f
+
+docker_run_flags=(--rm)
+if [ -t 0 ] && [ -t 1 ]; then
+  docker_run_flags+=(-it)
+else
+  docker_run_flags+=(-i)
+fi
+
+docker run "${docker_run_flags[@]}" \
+  -v "$(pwd):/workspace" \
+  "client_csharp-$img_name"
+
+docker container prune -f

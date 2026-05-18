@@ -1,5 +1,5 @@
 #!/bin/bash
-./compose_build.sh
+./compose_build.sh || exit 1
 
 # docker compose up
 
@@ -7,7 +7,7 @@
 # docker compose build --no-cache client-rust
 # docker compose build --no-cache client-csharp
 
-docker compose up -d
+docker compose up -d || exit 1
 docker compose logs -f gateway-python client-rust client-csharp
 
 docker container prune -f

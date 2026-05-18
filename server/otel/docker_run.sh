@@ -1,5 +1,6 @@
 #!/bin/bash
-. docker_build.sh
+set -euo pipefail
+./docker_build.sh
 
 # Oficjalny OpenTelemetry Collector (contrib): OTLP gRPC:4317, HTTP:4318; trace’y w `docker logs`.
 docker run --rm -it \

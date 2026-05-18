@@ -1,12 +1,21 @@
 #!/bin/bash
+set -euo pipefail
 img_name="runner"
 
+./docker_build.sh
 
 docker build --target "$img_name" -t "client_rust-$img_name" .
 
 docker image prune -f
 
-docker run --rm -it \
+docker_run_flags=(--rm)
+if [ -t 0 ] && [ -t 1 ]; then
+  docker_run_flags+=(-it)
+else
+  docker_run_flags+=(-i)
+fi
+
+docker run "${docker_run_flags[@]}" \
   --add-host=host.docker.internal:host-gateway \
   -e OTEL_DEMO_TRACE_EXPORT=otlp \
   -e OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://host.docker.internal:4318/v1/traces \

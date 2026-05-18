@@ -2,14 +2,13 @@
 #   • runtime-base — minimalny runtime
 #   • dev-env — toolchain Rust (workflow z volumenem: ./docker_build.sh)
 #   • builder — ZERO COPY źródeł; montujesz repo: -v "$(pwd):/workspace", potem ./Docker_start.sh
-#   • compile — pełna kompilacja w obrazie (docker compose build — zawsze świeży kod, m.in. propagator W3C)
-#   • runner — binarka z etapu compile (compose) albo z ./docker-target (stary skrypt na hoście)
+#   • runner — tylko COPY binarki z ./docker-target (z hosta po builderze); compose nie używa etapu compile-in-image
 #
-# Workflow lokalny (volumen):
+# Workflow lokalny (volumen + cache na hoście):
 #   cd clients/rust && ./docker_build.sh
 #
-# Workflow compose (bez hostowego cargo):
-#   docker compose build client-rust
+# Workflow compose:
+#   ./compose_build.sh   # najpierw powyższy build, potem docker compose build (szybki runner)
 
 # ==========================================
 # 1. RUNTIME BASE
@@ -37,18 +36,9 @@ FROM dev-env AS builder
 CMD ["/bin/sh", "-c", "sleep 2 && exec /usr/bin/bash /workspace/Docker_start.sh"]
 
 # ==========================================
-# 4. COMPILE — źródła z kontekstu builda (docker compose)
-# ==========================================
-FROM rust:1-bookworm AS compile
-WORKDIR /build
-COPY Cargo.toml ./
-COPY _src ./_src
-RUN cargo build --release
-
-# ==========================================
-# 5. RUNNER
+# 4. RUNNER — binarka z docker-target na hoście (po ./docker_build.sh)
 # ==========================================
 FROM runtime-base AS runner
 WORKDIR /app
-COPY --from=compile /build/target/release/client_rust /app/client_rust
+COPY docker-target/release/client_rust /app/client_rust
 CMD ["/bin/sh", "-c", "sleep 2 && exec /app/client_rust"]

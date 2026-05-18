@@ -18,7 +18,7 @@ use axum::response::Response;
 use axum::routing::post;
 use axum::Router;
 use opentelemetry::metrics::{Counter, Histogram};
-use opentelemetry::global;
+use opentelemetry::global::{self, BoxedTracer};
 use opentelemetry::trace::FutureExt;
 use opentelemetry::trace::SpanKind;
 use opentelemetry::trace::TraceContextExt;
@@ -482,7 +482,7 @@ fn nested_pipeline_msg(route: &[RouteSeg]) -> PipelineMsg {
 async fn post_nested_subpipeline(
     st: &St,
     nested_route: &[RouteSeg],
-    t: &impl Tracer,
+    t: &BoxedTracer,
     step_cx: &Context,
 ) -> Result<(), String> {
     let first_id = nested_route[0].id.trim();
@@ -629,7 +629,7 @@ async fn route_mode(st: &St, parent: &Context, mut m: PipelineMsg) -> Response {
                         index: i,
                     } => {
                         let name = span_name_for_activity(act);
-                        let mut step_sp = t.start_with_context(name.as_str(), &proc_cx);
+                        let mut step_sp = t.start_with_context(name, &proc_cx);
                         step_sp.set_attribute(KeyValue::new("demo.activity", act.clone()));
                         step_sp.set_attribute(KeyValue::new("demo.cpu_spin_sec", *sec));
                         step_sp.set_attribute(KeyValue::new("demo.step_index", *i as i64));
@@ -647,7 +647,7 @@ async fn route_mode(st: &St, parent: &Context, mut m: PipelineMsg) -> Response {
                         index: i,
                     } => {
                         let name = span_name_for_activity(act);
-                        let mut step_sp = t.start_with_context(name.as_str(), &proc_cx);
+                        let mut step_sp = t.start_with_context(name, &proc_cx);
                         step_sp.set_attribute(KeyValue::new("demo.activity", act.clone()));
                         step_sp.set_attribute(KeyValue::new("demo.cpu_spin_sec", *pre_sec));
                         step_sp.set_attribute(KeyValue::new("demo.step_index", *i as i64));
@@ -659,7 +659,7 @@ async fn route_mode(st: &St, parent: &Context, mut m: PipelineMsg) -> Response {
                                 .await;
                         }
                         if let Err(e) =
-                            post_nested_subpipeline(st, route.as_slice(), t, &step_cx).await
+                            post_nested_subpipeline(st, route.as_slice(), &t, &step_cx).await
                         {
                             return (StatusCode::BAD_GATEWAY, e).into_response();
                         }

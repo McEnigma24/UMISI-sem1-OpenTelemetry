@@ -132,8 +132,7 @@ services:
   #     otel:
   #       condition: service_started
 
-  # Rust: najpierw `cd clients/rust && ./docker_build.sh` → docker-target/release na dysku;
-  # potem docker compose build (runner = COPY binarki, jak cpp).
+  # Rust / C#: najpierw `./compose_build.sh` (volume → docker-target + publish-docker), potem szybki runner w compose.
   client-rust:
     build:
       context: ./clients/rust
@@ -160,10 +159,12 @@ services:
       pyroscope:
         condition: service_started
 
-  # C#: ten sam komunikat „Pyroscope push profiler” co Python/Rust (``PYROSCOPE_SERVER``); bez natywnego profilera .NET.
+  # C#: jak Rust — najpierw `./compose_build.sh` (builder + volumen → publish-docker na hoście).
   client-csharp:
     build:
       context: ./clients/csharp
+      dockerfile: Dockerfile
+      target: runner
     image: client_csharp
     environment:
       ASPNETCORE_URLS: http://0.0.0.0:8080

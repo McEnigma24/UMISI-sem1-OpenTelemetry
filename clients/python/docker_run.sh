@@ -1,5 +1,6 @@
 #!/bin/bash
-. docker_build.sh
+set -euo pipefail
+./docker_build.sh
 
 docker run --rm -it \
   --add-host=host.docker.internal:host-gateway \

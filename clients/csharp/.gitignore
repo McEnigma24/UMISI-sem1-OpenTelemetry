@@ -1,2 +1,4 @@
 bin/
 obj/
+publish-docker/
+.nuget_packages/

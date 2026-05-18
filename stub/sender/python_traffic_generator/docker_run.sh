@@ -1,5 +1,6 @@
 #!/bin/bash
-. docker_build.sh
+set -euo pipefail
+./docker_build.sh
 
 scenario="2-scenario-parallel.json"
 
