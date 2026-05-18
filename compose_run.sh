@@ -8,7 +8,7 @@
 # docker compose build --no-cache client-csharp
 
 docker compose up -d || exit 1
-docker compose logs -f gateway-python client-rust client-csharp
+docker compose logs -f gateway-python client-rust client-csharp client-go client-nodejs
 # docker compose logs -f otel # 'forward' - 'received' - 'Body:'
 
 docker container prune -f

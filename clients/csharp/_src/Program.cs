@@ -52,11 +52,14 @@ public static class Program
         TypeInfoResolver = new DefaultJsonTypeInfoResolver(),
     };
 
+    /// <summary>Pipeline log: jeden kanał do konsoli (provider z hosta) + OTLP przez <c>AddOpenTelemetry</c> — bez podwójnego <c>Console.WriteLine</c> + ILogger.</summary>
     private static void CsLine(string m)
     {
         var line = $"{DateTime.Now:HH:mm:ss.fff} {m}";
-        Console.WriteLine(line);
-        s_pipelineLog?.LogWarning("{Line}", line);
+        if (s_pipelineLog is not null)
+            s_pipelineLog.LogWarning("{Line}", line);
+        else
+            Console.WriteLine(line);
     }
 
     private static bool PyroscopePushLogLineEnabled()

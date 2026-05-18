@@ -4,41 +4,26 @@
       "id": "py",
       "visited": false,
       "processing_steps": [
-        { "activity": "hop-work", "time": "0.02s" }
+        { "activity": "hop-work", "time": "0.5s" }
       ]
     },
     {
       "id": "rs",
       "visited": false,
       "processing_steps": [
-        { "activity": "before-nested", "time": "0.02s" },
-        {
-          "activity": "nested-worker-chain",
-          "nested_route": [
-            {
-              "id": "rs",
-              "visited": false,
-              "processing_steps": [
-                { "activity": "hop-work", "time": "0.02s" }
-              ]
-            },
-            {
-              "id": "cs",
-              "visited": false,
-              "processing_steps": [
-                { "activity": "hop-work", "time": "0.02s" }
-              ]
-            }
-          ]
+        { "activity": "before-nested", "time": "0.7s" },
+        { "activity": "nested-worker-chain",
+          "nested_route": [ { "id": "go", "visited": false, "processing_steps": [ { "activity": "hop-work", "time": "1.02s" } ] },
+                            { "id": "js", "visited": false, "processing_steps": [ { "activity": "hop-work", "time": "1.52s" } ] }]
         },
-        { "activity": "after-nested", "time": "0.02s" }
+        { "activity": "after-nested", "time": "0.5s" }
       ]
     },
     {
       "id": "cs",
       "visited": false,
       "processing_steps": [
-        { "activity": "hop-work", "time": "0.02s" }
+        { "activity": "hop-work", "time": "0.9s" }
       ]
     }
   ],

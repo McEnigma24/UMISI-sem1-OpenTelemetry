@@ -15,7 +15,7 @@
 #
 # HTTP pipeline: niepusty JSON ``route`` + DEMO_PEER_* (mapa hopów). Z hosta gateway: http://127.0.0.1:18080
 # (POST /v1/pipeline; ``localhost`` bywa IPv6 — lepiej 127.0.0.1). Diagnoza: ``docker compose ps``, logi
-# ``gateway-python`` / ``client-csharp`` / ``client-rust``; pierwsze sekundy po starcie workery mogą jeszcze nie forwardować.
+# ``gateway-python`` / ``client-csharp`` / ``client-rust`` / ``client-go`` / ``client-nodejs``; pierwsze sekundy po starcie workery mogą jeszcze nie forwardować.
 # Pyroscope push (log startowy ten sam): Python ``pyroscope-io``, Rust ``pyroscope``; C# bez natywnego CorProfilera (szum w ``docker compose logs``) — tylko spójny komunikat + ``PYROSCOPE_SERVER``.
 # Stub traffic_generator: compose lub ręcznie: cd stub/sender/python_traffic_generator && ./docker_run.sh
 #
@@ -132,7 +132,7 @@ services:
   #     otel:
   #       condition: service_started
 
-  # Rust / C#: najpierw `./compose_build.sh` (volume → docker-target + publish-docker), potem szybki runner w compose.
+  # Rust / C# / Go / Node.js: najpierw `./compose_build.sh` (volume → docker-target + publish-docker), potem szybki runner w compose.
   client-rust:
     build:
       context: ./clients/rust
@@ -153,6 +153,8 @@ services:
       DEMO_PEER_PY: http://gateway-python:8080/v1/pipeline
       DEMO_PEER_RS: http://client-rust:8080/v1/pipeline
       DEMO_PEER_CS: http://client-csharp:8080/v1/pipeline
+      DEMO_PEER_GO: http://client-go:8080/v1/pipeline
+      DEMO_PEER_JS: http://client-nodejs:8080/v1/pipeline
       OTEL_SERVICE_NAME: worker_rust
       PYROSCOPE_SERVER: http://pyroscope:4040
     depends_on:
@@ -161,7 +163,7 @@ services:
       pyroscope:
         condition: service_started
 
-  # C#: jak Rust — najpierw `./compose_build.sh` (builder + volumen → publish-docker na hoście).
+  # C#: jak Rust / Go / Node — najpierw `./compose_build.sh` (builder + volumen → publish-docker na hoście).
   client-csharp:
     build:
       context: ./clients/csharp
@@ -184,6 +186,68 @@ services:
       DEMO_PEER_PY: http://gateway-python:8080/v1/pipeline
       DEMO_PEER_RS: http://client-rust:8080/v1/pipeline
       DEMO_PEER_CS: http://client-csharp:8080/v1/pipeline
+      DEMO_PEER_GO: http://client-go:8080/v1/pipeline
+      DEMO_PEER_JS: http://client-nodejs:8080/v1/pipeline
+      PYROSCOPE_SERVER: http://pyroscope:4040
+    depends_on:
+      otel:
+        condition: service_started
+      pyroscope:
+        condition: service_started
+
+  client-go:
+    build:
+      context: ./clients/go
+      dockerfile: Dockerfile
+      target: runner
+    image: client_go
+    environment:
+      OTEL_DEMO_TRACE_EXPORT: otlp
+      OTEL_DEMO_LOG_EXPORT: otlp
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://otel:4318/v1/traces
+      OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: http://otel:4318/v1/metrics
+      OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: http://otel:4318/v1/logs
+      OTEL_ENVIRONMENT: local
+      OTEL_DEMO_RESOURCE_TAG: lang-go
+      OTEL_SERVICE_NAME: worker_go
+      DEMO_HTTP_ADDR: 0.0.0.0:8080
+      DEMO_HTTP_PATH: /v1/pipeline
+      DEMO_CLIENT_ID: go
+      DEMO_PEER_PY: http://gateway-python:8080/v1/pipeline
+      DEMO_PEER_RS: http://client-rust:8080/v1/pipeline
+      DEMO_PEER_CS: http://client-csharp:8080/v1/pipeline
+      DEMO_PEER_GO: http://client-go:8080/v1/pipeline
+      DEMO_PEER_JS: http://client-nodejs:8080/v1/pipeline
+      PYROSCOPE_SERVER: http://pyroscope:4040
+    depends_on:
+      otel:
+        condition: service_started
+      pyroscope:
+        condition: service_started
+
+  client-nodejs:
+    build:
+      context: ./clients/nodejs
+      dockerfile: Dockerfile
+      target: runner
+    image: client_nodejs
+    environment:
+      OTEL_DEMO_TRACE_EXPORT: otlp
+      OTEL_DEMO_LOG_EXPORT: otlp
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://otel:4318/v1/traces
+      OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: http://otel:4318/v1/metrics
+      OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: http://otel:4318/v1/logs
+      OTEL_ENVIRONMENT: local
+      OTEL_DEMO_RESOURCE_TAG: lang-nodejs
+      OTEL_SERVICE_NAME: worker_nodejs
+      DEMO_HTTP_ADDR: 0.0.0.0:8080
+      DEMO_HTTP_PATH: /v1/pipeline
+      DEMO_CLIENT_ID: js
+      DEMO_PEER_PY: http://gateway-python:8080/v1/pipeline
+      DEMO_PEER_RS: http://client-rust:8080/v1/pipeline
+      DEMO_PEER_CS: http://client-csharp:8080/v1/pipeline
+      DEMO_PEER_GO: http://client-go:8080/v1/pipeline
+      DEMO_PEER_JS: http://client-nodejs:8080/v1/pipeline
       PYROSCOPE_SERVER: http://pyroscope:4040
     depends_on:
       otel:
@@ -213,6 +277,8 @@ services:
       DEMO_PEER_PY: http://gateway-python:8080/v1/pipeline
       DEMO_PEER_RS: http://client-rust:8080/v1/pipeline
       DEMO_PEER_CS: http://client-csharp:8080/v1/pipeline
+      DEMO_PEER_GO: http://client-go:8080/v1/pipeline
+      DEMO_PEER_JS: http://client-nodejs:8080/v1/pipeline
       OTEL_SERVICE_NAME: gateway_python
       PYROSCOPE_SERVER: http://pyroscope:4040
     depends_on:
