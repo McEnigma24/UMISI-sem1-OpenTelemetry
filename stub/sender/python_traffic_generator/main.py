@@ -13,8 +13,8 @@ Tryb 2 — scenariusz (meta-level):
   DEMO_SCENARIO_FILE lub pierwszy argument argv — JSON z ``groups[]``:
     - initial_delay_sec
     - periodicity — sekundy przerwy między kolejnymi seriami requestów (po każdej serii)
-    - repetitions — ile razy powtórzyć całą serię (send.payload_files); null lub brak = bez końca,
-      dopóki globalny stop
+    - repetitions — ile razy powtórzyć całą serię (send.payload_files); liczba całkowita;
+      null, brak lub napis ``"inf"`` = bez końca, dopóki globalny stop (SIGINT/SIGTERM, limity scenariusza)
     - send.mode: sequential | parallel (parallel = równoczesne POST httpx, nie kolejka wątków urllib)
     - send.payload_files — lista payloadów: pojedyncza nazwa pliku (bez „/”) szuka w ``routes/``
       obok katalogu ``scenarios/``; ścieżka z podkatalogiem jest względna do katalogu pliku scenariusza
@@ -399,7 +399,10 @@ async def group_runner(
     periodicity = float(group.get("periodicity") or 0)
     repetitions_limit = group.get("repetitions")
     if repetitions_limit is not None:
-        repetitions_limit = int(repetitions_limit)
+        if isinstance(repetitions_limit, str) and repetitions_limit.strip().lower() == "inf":
+            repetitions_limit = None
+        else:
+            repetitions_limit = int(repetitions_limit)
 
     send = group.get("send")
     if not isinstance(send, dict):

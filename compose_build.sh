@@ -8,6 +8,7 @@ echo "compose_build: Rust (Dockerfile builder + volumen /workspace)…"
 echo "compose_build: C# (Dockerfile builder + volumen /workspace)…"
 ( cd clients/csharp && ./docker_build.sh )
 
+clear
 docker compose build --parallel
 
 docker image prune -f
