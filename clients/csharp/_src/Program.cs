@@ -5,8 +5,8 @@
  * DEMO_VERBOSE_FRAMEWORK_LOGS — true/1/yes: więcej Microsoft/System.Net.Http/OpenTelemetry;
  *   domyślnie (false) — Warning+ dla frameworka i wyciszenie OTLP HttpClient (info).
  * DEMO_PROCESS_METRICS — false/0/no/off: nie rejestruj gauge demo.process.* (domyślnie włączone przy OTLP).
- * PYROSCOPE_SERVER + PYROSCOPE_ENABLED — ten sam komunikat „Pyroscope push profiler” co Python/Rust
- *   (push profili CPU w Pyroscope tylko tam; natywny CorProfiler .NET wyłączony — zalewa ``docker compose logs``).
+ * PYROSCOPE_SERVER + PYROSCOPE_ENABLED — ten sam komunikat „Pyroscope push profiler” co Python/Rust/Go/Node;
+ *   w tym obrazie brak natywnego CorProfilera .NET (push profilu CPU wymaga osobnego obrazu / zmiennych CORECLR_*).
  */
 using System.Collections;
 using System.Collections.Generic;
@@ -537,10 +537,12 @@ public static class Program
                         .SetResourceBuilder(ResB())
                         .AddMeter("worker_csharp")
                         .AddOtlpExporter(
-                            o =>
+                            (metricExporterOptions, metricReaderOptions) =>
                             {
-                                o.Endpoint = new Uri(MxEp());
-                                o.Protocol = OtlpExportProtocol.HttpProtobuf;
+                                metricExporterOptions.Endpoint = new Uri(MxEp());
+                                metricExporterOptions.Protocol = OtlpExportProtocol.HttpProtobuf;
+                                metricReaderOptions.PeriodicExportingMetricReaderOptions.ExportIntervalMilliseconds =
+                                    5000;
                             }));
         }
         else
@@ -625,7 +627,8 @@ public static class Program
                         httpFactory,
                         hopDuration,
                         msgCount,
-                        incomingTrace);
+                        incomingTrace,
+                        svcMetrics);
                     return routeRes;
                 }
 
@@ -644,9 +647,15 @@ public static class Program
         IHttpClientFactory httpFactory,
         Histogram<double> hopDuration,
         Counter<long> msgCount,
-        PropagationContext incomingTrace)
+        PropagationContext incomingTrace,
+        string serviceNameForMetrics)
     {
         var t0 = Stopwatch.GetTimestamp();
+        var pipelineTags = new TagList
+        {
+            { "service.name", serviceNameForMetrics },
+            { "demo.client_id", cid },
+        };
         using var hopAct = StartPipelineHopActivity(incomingTrace);
 
         var fi = FirstUnvisited(route);
@@ -771,8 +780,8 @@ public static class Program
         if (nextIdx is null)
         {
             CsLine($"[{cid}] respond (terminal route): {outJson}");
-            hopDuration.Record(Stopwatch.GetElapsedTime(t0).TotalMilliseconds);
-            msgCount.Add(1);
+            hopDuration.Record(Stopwatch.GetElapsedTime(t0).TotalMilliseconds, pipelineTags);
+            msgCount.Add(1, pipelineTags);
             return Results.Content(outJson, "application/json", statusCode: 200);
         }
 
@@ -801,8 +810,8 @@ public static class Program
             req.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
             var resp = await client.SendAsync(req);
             var txt = await resp.Content.ReadAsStringAsync();
-            hopDuration.Record(Stopwatch.GetElapsedTime(t0).TotalMilliseconds);
-            msgCount.Add(1);
+            hopDuration.Record(Stopwatch.GetElapsedTime(t0).TotalMilliseconds, pipelineTags);
+            msgCount.Add(1, pipelineTags);
             return Results.Content(txt, "application/json", statusCode: (int)resp.StatusCode);
         }
     }

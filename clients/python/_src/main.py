@@ -523,7 +523,8 @@ def _make_handler(
             finally:
                 otel_context.detach(token)
                 hop_hist.record(
-                    (time.perf_counter() - t0) * 1000.0, {"client_id": client_id}
+                    (time.perf_counter() - t0) * 1000.0,
+                    {**_process_metric_point_attributes(), "client_id": client_id},
                 )
 
         def _handle_route(
@@ -696,7 +697,9 @@ def _make_handler(
                     self.send_header("Content-Length", str(len(body_out)))
                     self.end_headers()
                     self.wfile.write(body_out)
-                    msg_counter.add(1, {"client_id": client_id})
+                    msg_counter.add(
+                        1, {**_process_metric_point_attributes(), "client_id": client_id}
+                    )
                     return
 
                 next_id = route[next_idx].get("id")
@@ -730,7 +733,9 @@ def _make_handler(
                 self.send_header("Content-Length", str(len(resp_body)))
                 self.end_headers()
                 self.wfile.write(resp_body)
-                msg_counter.add(1, {"client_id": client_id})
+                msg_counter.add(
+                    1, {**_process_metric_point_attributes(), "client_id": client_id}
+                )
 
     return Handler
 

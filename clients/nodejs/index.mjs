@@ -25,6 +25,13 @@ import {
   LoggerProvider,
   BatchLogRecordProcessor,
 } from "@opentelemetry/sdk-logs";
+import {
+  CompositePropagator,
+  W3CBaggagePropagator,
+  W3CTraceContextPropagator,
+} from "@opentelemetry/core";
+import { AlwaysOnSampler } from "@opentelemetry/sdk-trace-base";
+import { SEMRESATTRS_SERVICE_NAME } from "@opentelemetry/semantic-conventions";
 
 /** TextMapGetter dla Node `req.headers` (bez importu CJS z @opentelemetry/core w ESM). */
 const nodeHeaderGetter = {
@@ -253,7 +260,7 @@ function buildResource() {
   const svc = envOr("OTEL_SERVICE_NAME", "worker_nodejs");
   const tag = (process.env.OTEL_DEMO_RESOURCE_TAG || "").trim();
   const attrs = {
-    "service.name": svc,
+    [SEMRESATTRS_SERVICE_NAME]: svc,
     "service.version": "1.0.0",
     "service.instance.id": iid,
     "deployment.environment": envName,
@@ -280,6 +287,10 @@ function parseHttpAddr(addr) {
   return { host, port };
 }
 
+function pipelinePointAttrs(clientId) {
+  return { ...processMetricAttrs(), client_id: clientId };
+}
+
 async function httpPostJSON(url, bodyBytes, headerObj) {
   const headers = { ...headerObj, "content-type": "application/json" };
   const ac = new AbortController();
@@ -298,12 +309,29 @@ async function httpPostJSON(url, bodyBytes, headerObj) {
   }
 }
 
-function maybePyroscope() {
+async function startPyroscopeIfConfigured() {
   const srv = (process.env.PYROSCOPE_SERVER || "").trim();
   if (!srv) return;
-  console.warn(
-    "[nodejs] PYROSCOPE_SERVER ustawione — brak natywnego push profilu w tym obrazie (jak C#); OTLP bez zmian."
-  );
+  const en = (process.env.PYROSCOPE_ENABLED || "true").trim().toLowerCase();
+  if (["0", "false", "no", "off"].includes(en)) return;
+  const appName = envOr("OTEL_SERVICE_NAME", "worker_nodejs");
+  try {
+    const mod = await import("@pyroscope/nodejs");
+    const Pyroscope = mod.default ?? mod;
+    Pyroscope.init({
+      serverAddress: srv,
+      appName,
+      tags: { demo_client_id: envOr("DEMO_CLIENT_ID", "js") },
+      wall: { collectCpuTime: true },
+    });
+    Pyroscope.start();
+    const ts = new Date().toISOString().slice(11, 23);
+    console.warn(
+      `${ts} Pyroscope push profiler: server='${srv}' application_name='${appName}'`
+    );
+  } catch (e) {
+    console.warn("[nodejs] Pyroscope:", e?.message || e);
+  }
 }
 
 async function runPipelineOnce({
@@ -320,7 +348,7 @@ async function runPipelineOnce({
   t0,
 }) {
   const finishHop = () => {
-    hopHist.record(Date.now() - t0, { client_id: clientId });
+    hopHist.record(Date.now() - t0, pipelinePointAttrs(clientId));
   };
 
   const p = req.url.split("?")[0];
@@ -559,7 +587,7 @@ async function runPipelineOnce({
             jsLine(
               `[${clientId}] respond (terminal route): ${outBody.toString()}`
             );
-            msgCounter.add(1, { client_id: clientId });
+            msgCounter.add(1, pipelinePointAttrs(clientId));
             finishHop();
             res.writeHead(200, { "content-type": "application/json" });
             res.end(outBody);
@@ -597,7 +625,7 @@ async function runPipelineOnce({
               );
               const r = await httpPostJSON(nextURL.trim(), outBody, carrier);
               fwSpan.setAttribute("demo.downstream_status", r.status);
-              msgCounter.add(1, { client_id: clientId });
+              msgCounter.add(1, pipelinePointAttrs(clientId));
               finishHop();
               res.writeHead(r.status, { "content-type": "application/json" });
               res.end(r.body);
@@ -631,6 +659,13 @@ async function main() {
   let logProvider;
 
   if (useOtlp()) {
+    /** Jak Rust: jawny W3C — inaczej przy nietypowym OTEL_PROPAGATORS extract/inject może być noop. */
+    const textMapPropagator = new CompositePropagator({
+      propagators: [
+        new W3CTraceContextPropagator(),
+        new W3CBaggagePropagator(),
+      ],
+    });
     sdk = new NodeSDK({
       resource,
       traceExporter: new OTLPTraceExporter({ url: otlpTracesEp() }),
@@ -638,6 +673,9 @@ async function main() {
         exporter: new OTLPMetricExporter({ url: otlpMetricsEp() }),
         exportIntervalMillis: 5000,
       }),
+      textMapPropagator,
+      /** ParentBased: remote z traceparent „nie próbkuj” → domyślnie AlwaysOff — spanów nie widać w Jaegerze. */
+      sampler: new AlwaysOnSampler(),
     });
     sdk.start();
 
@@ -691,7 +729,7 @@ async function main() {
     });
   }
 
-  maybePyroscope();
+  await startPyroscopeIfConfigured();
 
   const peers = loadPeerMap();
   const clientId = envOr("DEMO_CLIENT_ID", "js");
@@ -723,7 +761,7 @@ async function main() {
     }).catch((e) => {
       console.error(e);
       try {
-        hopHist.record(Date.now() - t0, { client_id: clientId });
+        hopHist.record(Date.now() - t0, pipelinePointAttrs(clientId));
       } catch {
         /* noop */
       }

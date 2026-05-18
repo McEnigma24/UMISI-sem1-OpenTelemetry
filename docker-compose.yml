@@ -16,7 +16,8 @@
 # HTTP pipeline: niepusty JSON ``route`` + DEMO_PEER_* (mapa hopów). Z hosta gateway: http://127.0.0.1:18080
 # (POST /v1/pipeline; ``localhost`` bywa IPv6 — lepiej 127.0.0.1). Diagnoza: ``docker compose ps``, logi
 # ``gateway-python`` / ``client-csharp`` / ``client-rust`` / ``client-go`` / ``client-nodejs``; pierwsze sekundy po starcie workery mogą jeszcze nie forwardować.
-# Pyroscope push (log startowy ten sam): Python ``pyroscope-io``, Rust ``pyroscope``; C# bez natywnego CorProfilera (szum w ``docker compose logs``) — tylko spójny komunikat + ``PYROSCOPE_SERVER``.
+# Pyroscope push (log startowy ten sam): Python ``pyroscope-io``, Rust ``pyroscope``, Go ``pyroscope-go``, Node ``@pyroscope/nodejs``.
+# C# — bez wbudowanego push CPU (profiler natywny wymaga osobnego obrazu / zmiennych CORECLR_*); tylko spójny komunikat + ``PYROSCOPE_SERVER``.
 # Stub traffic_generator: compose lub ręcznie: cd stub/sender/python_traffic_generator && ./docker_run.sh
 #
 services:
@@ -78,8 +79,8 @@ services:
         condition: service_started
 
   # Profiling (Grafana Pyroscope). Drilldown „Profiles / Diff flame graph” = dwa zakresy czasu profilu CPU
-  #   (continuous profiling), nie porównanie dwóch trace_id. ``gateway-python`` i ``client-rust`` wysyłają push
-  #   profili (PYROSCOPE_SERVER); C# — tylko OTLP w tym repo. Trace→span profil: ``pyroscope.profile.id`` osobno.
+  #   (continuous profiling), nie porównanie dwóch trace_id. ``gateway-python``, ``client-rust``, ``client-go``, ``client-nodejs`` wysyłają push
+  #   profili (PYROSCOPE_SERVER); C# — brak push profilu CPU w tym obrazie (profiler .NET osobno). Trace→span profil: ``pyroscope.profile.id`` osobno.
   # Dok.: https://grafana.com/docs/pyroscope/latest/configure-client/
   pyroscope:
     image: grafana/pyroscope:latest
@@ -156,6 +157,7 @@ services:
       DEMO_PEER_GO: http://client-go:8080/v1/pipeline
       DEMO_PEER_JS: http://client-nodejs:8080/v1/pipeline
       OTEL_SERVICE_NAME: worker_rust
+      OTEL_METRIC_EXPORT_INTERVAL: "5000"
       PYROSCOPE_SERVER: http://pyroscope:4040
     depends_on:
       otel:
@@ -180,6 +182,7 @@ services:
       OTEL_ENVIRONMENT: local
       OTEL_DEMO_RESOURCE_TAG: lang-csharp
       OTEL_SERVICE_NAME: worker_csharp
+      OTEL_METRIC_EXPORT_INTERVAL: "5000"
       DEMO_HTTP_ADDR: 0.0.0.0:8080
       DEMO_HTTP_PATH: /v1/pipeline
       DEMO_CLIENT_ID: cs
@@ -210,6 +213,7 @@ services:
       OTEL_ENVIRONMENT: local
       OTEL_DEMO_RESOURCE_TAG: lang-go
       OTEL_SERVICE_NAME: worker_go
+      OTEL_METRIC_EXPORT_INTERVAL: "5000"
       DEMO_HTTP_ADDR: 0.0.0.0:8080
       DEMO_HTTP_PATH: /v1/pipeline
       DEMO_CLIENT_ID: go
@@ -240,6 +244,7 @@ services:
       OTEL_ENVIRONMENT: local
       OTEL_DEMO_RESOURCE_TAG: lang-nodejs
       OTEL_SERVICE_NAME: worker_nodejs
+      OTEL_METRIC_EXPORT_INTERVAL: "5000"
       DEMO_HTTP_ADDR: 0.0.0.0:8080
       DEMO_HTTP_PATH: /v1/pipeline
       DEMO_CLIENT_ID: js
@@ -280,6 +285,7 @@ services:
       DEMO_PEER_GO: http://client-go:8080/v1/pipeline
       DEMO_PEER_JS: http://client-nodejs:8080/v1/pipeline
       OTEL_SERVICE_NAME: gateway_python
+      OTEL_METRIC_EXPORT_INTERVAL: "5000"
       PYROSCOPE_SERVER: http://pyroscope:4040
     depends_on:
       otel:

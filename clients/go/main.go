@@ -202,6 +202,11 @@ func processMetricAttrs() []attribute.KeyValue {
 	}
 }
 
+func pipelineMetricAttrs(clientID string) []attribute.KeyValue {
+	a := processMetricAttrs()
+	return append(append([]attribute.KeyValue{}, a...), attribute.String("client_id", clientID))
+}
+
 func maxProcessingSec() float64 {
 	s := strings.TrimSpace(os.Getenv("DEMO_MAX_PROCESSING_SEC"))
 	if s == "" {
@@ -504,7 +509,7 @@ func (st *appState) handlePipeline(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() {
 		ms := float64(time.Since(t0).Milliseconds())
-		st.hopHist.Record(r.Context(), ms, metric.WithAttributes(attribute.String("client_id", st.clientID)))
+		st.hopHist.Record(r.Context(), ms, metric.WithAttributes(pipelineMetricAttrs(st.clientID)...))
 	}()
 
 	var msg pipelineMsg
@@ -662,7 +667,7 @@ func (st *appState) handlePipeline(w http.ResponseWriter, r *http.Request) {
 
 	if nextIdx < 0 {
 		st.goLine(fmt.Sprintf("[%s] respond (terminal route): %s", st.clientID, string(outBody)))
-		st.msgCounter.Add(r.Context(), 1, metric.WithAttributes(attribute.String("client_id", st.clientID)))
+		st.msgCounter.Add(r.Context(), 1, metric.WithAttributes(pipelineMetricAttrs(st.clientID)...))
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(outBody)
@@ -694,7 +699,7 @@ func (st *appState) handlePipeline(w http.ResponseWriter, r *http.Request) {
 	fwSpan.SetAttributes(attribute.Int("demo.downstream_status", code))
 	fwSpan.End()
 
-	st.msgCounter.Add(r.Context(), 1, metric.WithAttributes(attribute.String("client_id", st.clientID)))
+	st.msgCounter.Add(r.Context(), 1, metric.WithAttributes(pipelineMetricAttrs(st.clientID)...))
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_, _ = w.Write(respBody)

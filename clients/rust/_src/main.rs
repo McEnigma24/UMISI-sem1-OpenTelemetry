@@ -119,8 +119,8 @@ impl HopDurationGuard {
 impl Drop for HopDurationGuard {
     fn drop(&mut self) {
         let ms = self.t0.elapsed().as_secs_f64() * 1000.0;
-        let cid = self.client_id.clone();
-        self.hop_hist.record(ms, &[KeyValue::new("client_id", cid)]);
+        self.hop_hist
+            .record(ms, &pipeline_point_kv(self.client_id.as_str()));
     }
 }
 
@@ -211,7 +211,7 @@ fn init_otlp_logs() {
     let ep = otlp_logs_endpoint();
     let exporter = match LogExporter::builder()
         .with_http()
-        .with_protocol(Protocol::HttpJson)
+        .with_protocol(Protocol::HttpBinary)
         .with_endpoint(ep.as_str())
         .build()
     {
@@ -249,6 +249,16 @@ fn process_metric_point_attributes() -> [KeyValue; 2] {
     [
         KeyValue::new("service.name", service_name),
         KeyValue::new("demo.client_id", client_id),
+    ]
+}
+
+/// Atrybuty punktu metryki pipeline (jak Python): `service.name` + `demo.client_id` + `client_id`.
+fn pipeline_point_kv(client_id: &str) -> Vec<KeyValue> {
+    let a = process_metric_point_attributes();
+    vec![
+        a[0].clone(),
+        a[1].clone(),
+        KeyValue::new("client_id", client_id.to_string()),
     ]
 }
 
@@ -317,7 +327,7 @@ fn init_metrics_provider() -> SdkMeterProvider {
     let e = metrics_otlp_endpoint();
     let ex = MetricExporter::builder()
         .with_http()
-        .with_protocol(Protocol::HttpJson)
+        .with_protocol(Protocol::HttpBinary)
         .with_endpoint(e)
         .with_timeout(Duration::from_secs(5))
         .build()
@@ -334,7 +344,7 @@ fn init_otel() -> SdkTracerProvider {
             .unwrap_or_else(|_| "http://127.0.0.1:4318/v1/traces".to_string());
         let ex = SpanExporter::builder()
             .with_http()
-            .with_protocol(Protocol::HttpJson)
+            .with_protocol(Protocol::HttpBinary)
             .with_endpoint(e)
             .with_timeout(Duration::from_secs(5))
             .build()
@@ -798,9 +808,7 @@ async fn route_mode(st: &St, parent: &Context, mut m: PipelineMsg) -> Response {
                 return (StatusCode::BAD_GATEWAY, e).into_response();
             }
         };
-        let cid = st.id.clone();
-        st.msg_counter
-            .add(1, &[KeyValue::new("client_id", cid)]);
+        st.msg_counter.add(1, &pipeline_point_kv(st.id.as_str()));
         return Response::builder()
             .status(status)
             .header("content-type", "application/json")
@@ -818,9 +826,7 @@ async fn route_mode(st: &St, parent: &Context, mut m: PipelineMsg) -> Response {
         "[{}] respond (terminal route): {out}",
         st.id
     ));
-    let cid = st.id.clone();
-    st.msg_counter
-        .add(1, &[KeyValue::new("client_id", cid)]);
+    st.msg_counter.add(1, &pipeline_point_kv(st.id.as_str()));
     Response::builder()
         .status(StatusCode::OK)
         .header("content-type", "application/json")
