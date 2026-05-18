@@ -6,6 +6,8 @@ Payload musi zawierać niepustą listę ``route`` (pierwszy segment = gateway, n
   Każdy węzeł obsługuje pierwszy nieodwiedzony segment z ``id`` == DEMO_CLIENT_ID,
   symuluje pracę CPU (pętla obliczeń) przez ``processing_time`` lub ``processing_steps`` …
   (wspólny span ``pipeline.processing``, podspany o nazwie ``activity`` — jeden traceId).
+  Opcja ``nested_route`` w elemencie ``processing_steps``: osobny POST na pierwszego workera
+  (pierwszy ``id`` ≠ ``py``), propagacja W3C z bieżącego kroku; opcjonalne ``time`` = CPU przed nested.
   Oznacza visited, aktualizuje counter/table/visit_log, forward wg DEMO_PEER_* / DEMO_PEER_MAP.
 
 OTLP: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT, opcj. metryki.
@@ -29,6 +31,7 @@ import sys
 import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from dataclasses import dataclass
 from typing import Any
 from urllib import error as urlerror
 from urllib import request as urlrequest
@@ -291,24 +294,97 @@ def _span_name_for_activity(activity: str, index: int) -> str:
     return a[:256]
 
 
-def _parse_processing_steps(seg: dict[str, Any]) -> list[tuple[str, float]] | None:
-    """Jeśli ``processing_steps`` to niepusta lista, zwraca [(activity, sekundy), …]. W p. p. None (tryb legacy)."""
+@dataclass(frozen=True)
+class _ProcStepCpu:
+    activity: str
+    sec: float
+    index: int
+
+
+@dataclass(frozen=True)
+class _ProcStepNested:
+    activity: str
+    pre_sec: float
+    nested_route: tuple[dict[str, Any], ...]
+    index: int
+
+
+def _validate_nested_route_segments(raw: list[Any], step_i: int) -> tuple[dict[str, Any], ...]:
+    if not raw:
+        raise ValueError(f"processing_steps[{step_i}].nested_route must be a non-empty array")
+    out: list[dict[str, Any]] = []
+    for j, seg in enumerate(raw):
+        if not isinstance(seg, dict):
+            raise ValueError(
+                f"processing_steps[{step_i}].nested_route[{j}] must be an object"
+            )
+        sid = seg.get("id")
+        if not isinstance(sid, str) or not sid.strip():
+            raise ValueError(
+                f"processing_steps[{step_i}].nested_route[{j}].id must be a non-empty string"
+            )
+        out.append(seg)
+    first = (out[0].get("id") or "").strip().lower()
+    if first == "py":
+        raise ValueError(
+            f"processing_steps[{step_i}].nested_route[0].id must not be 'py' (workers only)"
+        )
+    return tuple(out)
+
+
+def _nested_pipeline_payload(nested_route: tuple[dict[str, Any], ...]) -> dict[str, Any]:
+    nr: list[dict[str, Any]] = []
+    for s in nested_route:
+        s2 = dict(s)
+        s2["visited"] = False
+        nr.append(s2)
+    return {
+        "route": nr,
+        "visit_log": [],
+        "counter": "0",
+        "table_of_clients": [],
+    }
+
+
+def _parse_processing_steps(
+    seg: dict[str, Any],
+) -> list[_ProcStepCpu | _ProcStepNested] | None:
+    """Lista kroków: CPU albo ``nested_route`` (tylko workery; pierwszy ``id`` ≠ ``py``)."""
     raw = seg.get("processing_steps")
     if not isinstance(raw, list) or len(raw) == 0:
         return None
-    out: list[tuple[str, float]] = []
+    out: list[_ProcStepCpu | _ProcStepNested] = []
     for i, item in enumerate(raw):
         if not isinstance(item, dict):
             raise ValueError(f"processing_steps[{i}] must be an object")
-        act = item.get("activity")
-        if not isinstance(act, str):
-            act = f"step_{i}"
-        try:
-            sec = _parse_processing_time(item.get("time"))
-        except ValueError as e:
-            raise ValueError(f"processing_steps[{i}].time: {e}") from e
-        out.append((act, sec))
+        act_raw = item.get("activity")
+        act = act_raw if isinstance(act_raw, str) else f"step_{i}"
+        nr = item.get("nested_route")
+        if nr is not None:
+            if not isinstance(nr, list):
+                raise ValueError(f"processing_steps[{i}].nested_route must be an array")
+            validated = _validate_nested_route_segments(nr, i)
+            try:
+                pre = _parse_processing_time(item.get("time"))
+            except ValueError as e:
+                raise ValueError(f"processing_steps[{i}].time: {e}") from e
+            out.append(
+                _ProcStepNested(
+                    activity=act, pre_sec=pre, nested_route=validated, index=i
+                )
+            )
+        else:
+            try:
+                sec = _parse_processing_time(item.get("time"))
+            except ValueError as e:
+                raise ValueError(f"processing_steps[{i}].time: {e}") from e
+            out.append(_ProcStepCpu(activity=act, sec=sec, index=i))
     return out
+
+
+def _peer_url(peers: dict[str, str], seg_id: str) -> str | None:
+    nid = seg_id.strip().lower()
+    return peers.get(nid) or peers.get(seg_id.strip())
 
 
 def _first_unvisited_index(route: list[Any]) -> int | None:
@@ -442,30 +518,101 @@ def _make_handler(
                 },
             ) as span:
                 if steps is not None:
-                    total = sum(s for _, s in steps)
-                    span.set_attribute("demo.simulated_processing_sec", total)
+                    cpu_sum = 0.0
+                    has_nested = False
+                    for st in steps:
+                        if isinstance(st, _ProcStepNested):
+                            has_nested = True
+                            cpu_sum += st.pre_sec
+                        else:
+                            cpu_sum += st.sec
+                    span.set_attribute("demo.simulated_processing_sec", cpu_sum)
                     span.set_attribute("demo.processing.mode", "steps")
                     span.set_attribute("demo.step_count", len(steps))
+                    span.set_attribute("demo.has_nested_steps", has_nested)
                     with tr.start_as_current_span(
                         "pipeline.processing",
                         attributes={
                             "demo.processing.mode": "steps",
                             "demo.step_count": len(steps),
-                            "demo.simulated_processing_sec": total,
+                            "demo.simulated_processing_sec": cpu_sum,
+                            "demo.has_nested_steps": has_nested,
                         },
                     ):
-                        for i, (act, sec) in enumerate(steps):
-                            name = _span_name_for_activity(act, i)
-                            with tr.start_as_current_span(
-                                name,
-                                attributes={
-                                    "demo.activity": act,
-                                    "demo.cpu_spin_sec": sec,
-                                    "demo.step_index": i,
-                                },
-                            ):
-                                if sec > 0:
-                                    _cpu_spin_seconds(sec)
+                        for st in steps:
+                            if isinstance(st, _ProcStepCpu):
+                                name = _span_name_for_activity(st.activity, st.index)
+                                with tr.start_as_current_span(
+                                    name,
+                                    attributes={
+                                        "demo.activity": st.activity,
+                                        "demo.cpu_spin_sec": st.sec,
+                                        "demo.step_index": st.index,
+                                    },
+                                ):
+                                    if st.sec > 0:
+                                        _cpu_spin_seconds(st.sec)
+                            else:
+                                name = _span_name_for_activity(st.activity, st.index)
+                                with tr.start_as_current_span(
+                                    name,
+                                    attributes={
+                                        "demo.activity": st.activity,
+                                        "demo.cpu_spin_sec": st.pre_sec,
+                                        "demo.step_index": st.index,
+                                        "demo.nested_subpipeline": True,
+                                    },
+                                ):
+                                    if st.pre_sec > 0:
+                                        _cpu_spin_seconds(st.pre_sec)
+                                    first_id = (
+                                        st.nested_route[0].get("id") or ""
+                                    ).strip()
+                                    if not first_id:
+                                        self.send_error(
+                                            400,
+                                            f"processing_steps[{st.index}].nested_route[0].id empty",
+                                        )
+                                        return
+                                    nurl = _peer_url(peers, first_id)
+                                    if not nurl:
+                                        self.send_error(
+                                            502,
+                                            f"no peer URL for nested id {first_id!r}",
+                                        )
+                                        return
+                                    nest_payload = _nested_pipeline_payload(st.nested_route)
+                                    nest_bytes = json.dumps(
+                                        nest_payload, ensure_ascii=False
+                                    ).encode("utf-8")
+                                    py_line(
+                                        f"[{client_id}] nested_forward to {nurl}: "
+                                        f"{json.dumps(nest_payload, ensure_ascii=False)}"
+                                    )
+                                    with tr.start_as_current_span(
+                                        "pipeline.nested_forward",
+                                        kind=trace.SpanKind.CLIENT,
+                                        attributes={"http.url": nurl.strip()},
+                                    ) as nfw:
+                                        try:
+                                            ncode, _nbody = _forward_to_next(
+                                                nurl.strip(), nest_bytes
+                                            )
+                                        except (urlerror.URLError, OSError) as e:
+                                            nfw.record_exception(e)
+                                            self.send_error(
+                                                502, f"nested_forward failed: {e}"
+                                            )
+                                            return
+                                        nfw.set_attribute(
+                                            "demo.downstream_status", ncode
+                                        )
+                                        if ncode < 200 or ncode >= 300:
+                                            self.send_error(
+                                                502,
+                                                f"nested_forward HTTP {ncode}",
+                                            )
+                                            return
                 elif dur_legacy > 0:
                     span.set_attribute("demo.simulated_processing_sec", dur_legacy)
                     span.set_attribute("demo.processing.mode", "single")

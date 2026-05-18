@@ -1,4 +1,5 @@
-img_name="dev-env"
+#!/bin/bash
+img_name="builder"
 
 
 docker build --target "$img_name" -t "client_cpp-$img_name" .

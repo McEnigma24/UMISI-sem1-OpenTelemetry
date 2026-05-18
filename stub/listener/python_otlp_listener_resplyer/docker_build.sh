@@ -1,3 +1,4 @@
+#!/bin/bash
 docker build -t server_python .
 
 docker image prune -f

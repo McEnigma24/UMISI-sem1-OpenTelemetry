@@ -1,5 +1,6 @@
 /*
  * HTTP pipeline (C#). POST DEMO_HTTP_PATH — JSON z ``route``.
+ * ``processing_steps`` mogą zawierać ``nested_route`` (tylko workery; pierwszy ``id`` ≠ ``py``) + opcj. ``time`` (CPU przed POST).
  *
  * DEMO_VERBOSE_FRAMEWORK_LOGS — true/1/yes: więcej Microsoft/System.Net.Http/OpenTelemetry;
  *   domyślnie (false) — Warning+ dla frameworka i wyciszenie OTLP HttpClient (info).
@@ -296,6 +297,43 @@ public static class Program
         return act.Length <= 256 ? act : act[..256];
     }
 
+    private static string? ValidateNestedRoute(JsonArray nested, int stepIndex)
+    {
+        if (nested.Count == 0)
+            return $"processing_steps[{stepIndex}].nested_route must be non-empty";
+        var first = nested[0]?.AsObject();
+        var fid = first?["id"]?.GetValue<string>() ?? "";
+        if (string.IsNullOrWhiteSpace(fid))
+            return $"processing_steps[{stepIndex}].nested_route[0].id must be non-empty";
+        if (fid.Trim().Equals("py", StringComparison.OrdinalIgnoreCase))
+            return $"processing_steps[{stepIndex}].nested_route[0].id must not be 'py' (workers only)";
+        return null;
+    }
+
+    private static JsonArray CloneRouteWithVisitedFalse(JsonArray src)
+    {
+        var o = new JsonArray();
+        foreach (var el in src)
+        {
+            if (el is not JsonObject jo)
+                continue;
+            var copy = JsonNode.Parse(jo.ToJsonString()) as JsonObject ?? new JsonObject();
+            copy["visited"] = false;
+            o.Add(copy);
+        }
+
+        return o;
+    }
+
+    private static JsonObject BuildNestedPipelineRoot(JsonArray nestedRouteFresh) =>
+        new()
+        {
+            ["route"] = nestedRouteFresh,
+            ["visit_log"] = new JsonArray(),
+            ["counter"] = "0",
+            ["table_of_clients"] = new JsonArray(),
+        };
+
     /// <summary>
     /// Span <c>pipeline.hop</c> z rodzicem z nagłówków W3C (<c>traceparent</c>) — tak samo jak Python/Rust,
     /// bo <see cref="Activity.Current"/> z ASP.NET bywa puste lub bez relacji do upstreamu przy minimalnych API.
@@ -571,35 +609,88 @@ public static class Program
 
         if (seg["processing_steps"] is JsonArray stepsArr && stepsArr.Count > 0)
         {
-            var list = new List<(string Act, double Sec)>();
+            var parsed = new List<(string Act, double Spin, JsonArray? Nested)>();
             for (var i = 0; i < stepsArr.Count; i++)
             {
                 var o = stepsArr[i]?.AsObject();
                 if (o is null)
                     return Results.BadRequest($"processing_steps[{i}] must be an object");
                 var act = o["activity"]?.GetValue<string>() ?? $"step_{i}";
-                if (!TryParseProcessing(o["time"]?.GetValue<string>(), maxProc, out var sec, out var perr))
-                    return Results.BadRequest(perr ?? $"processing_steps[{i}].time invalid");
-                list.Add((act, sec));
+                if (o["nested_route"] is JsonArray nr && nr.Count > 0)
+                {
+                    var verr = ValidateNestedRoute(nr, i);
+                    if (verr is not null)
+                        return Results.BadRequest(verr);
+                    if (!TryParseProcessing(o["time"]?.GetValue<string>(), maxProc, out var pre, out var perr2))
+                        return Results.BadRequest(perr2 ?? $"processing_steps[{i}].time invalid");
+                    parsed.Add((act, pre, nr));
+                }
+                else
+                {
+                    if (!TryParseProcessing(o["time"]?.GetValue<string>(), maxProc, out var sec, out var perr))
+                        return Results.BadRequest(perr ?? $"processing_steps[{i}].time invalid");
+                    parsed.Add((act, sec, null));
+                }
             }
 
-            var total = list.Sum(x => x.Sec);
-            hopAct?.SetTag("demo.simulated_processing_sec", total);
+            var cpuSum = parsed.Sum(x => x.Spin);
+            var hasNested = parsed.Any(x => x.Nested is not null);
+            hopAct?.SetTag("demo.simulated_processing_sec", cpuSum);
             hopAct?.SetTag("demo.processing.mode", "steps");
-            hopAct?.SetTag("demo.step_count", list.Count);
+            hopAct?.SetTag("demo.step_count", parsed.Count);
+            hopAct?.SetTag("demo.has_nested_steps", hasNested);
             using (Act.StartActivity("pipeline.processing", ActivityKind.Internal))
             {
-                for (var i = 0; i < list.Count; i++)
+                for (var i = 0; i < parsed.Count; i++)
                 {
-                    var (act, sec) = list[i];
+                    var (act, spin, nested) = parsed[i];
                     var name = ActivityNameFromActivity(act);
                     using (Act.StartActivity(name, ActivityKind.Internal))
                     {
                         Activity.Current?.SetTag("demo.activity", act);
-                        Activity.Current?.SetTag("demo.cpu_spin_sec", sec);
+                        Activity.Current?.SetTag("demo.cpu_spin_sec", spin);
                         Activity.Current?.SetTag("demo.step_index", i);
-                        if (sec > 0)
-                            await Task.Run(() => CpuSpinForSeconds(sec));
+                        if (nested is not null)
+                            Activity.Current?.SetTag("demo.nested_subpipeline", true);
+                        if (spin > 0)
+                            await Task.Run(() => CpuSpinForSeconds(spin));
+                        if (nested is not null)
+                        {
+                            var clone = CloneRouteWithVisitedFalse(nested);
+                            var rootNest = BuildNestedPipelineRoot(clone);
+                            var firstSeg = nested[0]?.AsObject();
+                            var firstId = firstSeg?["id"]?.GetValue<string>()?.Trim();
+                            if (string.IsNullOrWhiteSpace(firstId))
+                                return Results.BadRequest($"processing_steps[{i}].nested_route[0].id empty");
+                            var nestedPeerKey = firstId.Trim().ToLowerInvariant();
+                            if (!peers.TryGetValue(nestedPeerKey, out var nurl))
+                            {
+                                return Results.Json(
+                                    new { error = $"no peer URL for nested id {firstId}" },
+                                    statusCode: 502);
+                            }
+
+                            var nestJson = NodeToJsonString(rootNest);
+                            CsLine($"[{cid}] nested_forward to {nurl}: {nestJson}");
+                            using (Act.StartActivity("pipeline.nested_forward", ActivityKind.Client))
+                            {
+                                Activity.Current?.SetTag("http.url", nurl);
+                                var client = httpFactory.CreateClient();
+                                using var req = new HttpRequestMessage(HttpMethod.Post, nurl)
+                                {
+                                    Content = new StringContent(nestJson, Encoding.UTF8, "application/json"),
+                                };
+                                req.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+                                var resp = await client.SendAsync(req);
+                                Activity.Current?.SetTag("demo.downstream_status", (int)resp.StatusCode);
+                                if (!resp.IsSuccessStatusCode)
+                                {
+                                    return Results.Json(
+                                        new { error = $"nested_forward HTTP {(int)resp.StatusCode}" },
+                                        statusCode: 502);
+                                }
+                            }
+                        }
                     }
                 }
             }

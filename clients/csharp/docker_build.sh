@@ -1,3 +1,4 @@
+#!/bin/bash
 docker build -t client_csharp .
 
 docker image prune -f

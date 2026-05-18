@@ -1,13 +1,19 @@
-. docker_build
+#!/bin/bash
+img_name="runner"
+
+
+docker build --target "$img_name" -t "client_cpp-$img_name" .
+
+docker image prune -f
+
+
 
 docker run --rm -it \
   --add-host=host.docker.internal:host-gateway \
   -e OTEL_DEMO_TRACE_EXPORT=otlp \
   -e OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://host.docker.internal:4318/v1/traces \
   -e OTEL_ENVIRONMENT=local \
-  -e OTEL_DEMO_RESOURCE_TAG=lang-csharp \
-  client_csharp
-
-  # -v "$(pwd)/build-docker:/app/build" \
+  -e OTEL_DEMO_RESOURCE_TAG=lang-cpp \
+  "client_cpp-$img_name"
 
 docker container prune -f

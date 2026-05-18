@@ -1,4 +1,5 @@
-. docker_build
+#!/bin/bash
+. docker_build.sh
 
 # Serwer OTLP/HTTP — mapowanie 4318 na hosta, żeby klienci (C++/Python) łączyli się
 # np. http://127.0.0.1:4318/v1/traces

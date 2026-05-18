@@ -1,0 +1,32 @@
+{
+  "route": [
+    {
+      "id": "py",
+      "visited": false,
+      "processing_time": "0.02s"
+    },
+    {
+      "id": "rs",
+      "visited": false,
+      "processing_steps": [
+        { "activity": "before-nested", "time": "0.02s" },
+        {
+          "activity": "nested-worker-chain",
+          "nested_route": [
+            { "id": "rs", "visited": false, "processing_time": "0.02s" },
+            { "id": "cs", "visited": false, "processing_time": "0.02s" }
+          ]
+        },
+        { "activity": "after-nested", "time": "0.02s" }
+      ]
+    },
+    {
+      "id": "cs",
+      "visited": false,
+      "processing_time": "0.02s"
+    }
+  ],
+  "visit_log": [],
+  "counter": "0",
+  "table_of_clients": []
+}

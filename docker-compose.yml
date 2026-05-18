@@ -132,7 +132,7 @@ services:
   #     otel:
   #       condition: service_started
 
-  # Rust: najpierw `cd clients/rust && ./docker_build` → docker-target/release na dysku;
+  # Rust: najpierw `cd clients/rust && ./docker_build.sh` → docker-target/release na dysku;
   # potem docker compose build (runner = COPY binarki, jak cpp).
   client-rust:
     build:

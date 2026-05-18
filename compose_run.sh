@@ -1,4 +1,5 @@
-. compose_build
+#!/bin/bash
+./compose_build.sh
 
 # docker compose up
 

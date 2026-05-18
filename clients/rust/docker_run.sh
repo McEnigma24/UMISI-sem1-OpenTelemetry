@@ -1,3 +1,4 @@
+#!/bin/bash
 img_name="runner"
 
 

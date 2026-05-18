@@ -1,3 +1,4 @@
+#!/bin/bash
 docker build -t server_otel .
 
 docker image prune -f

@@ -1,11 +1,14 @@
-. docker_build
+#!/bin/bash
+. docker_build.sh
 
 docker run --rm -it \
   --add-host=host.docker.internal:host-gateway \
   -e OTEL_DEMO_TRACE_EXPORT=otlp \
   -e OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://host.docker.internal:4318/v1/traces \
   -e OTEL_ENVIRONMENT=local \
-  -e OTEL_DEMO_RESOURCE_TAG=lang-python \
-  client_python
+  -e OTEL_DEMO_RESOURCE_TAG=lang-csharp \
+  client_csharp
+
+  # -v "$(pwd)/build-docker:/app/build" \
 
 docker container prune -f

@@ -1,3 +1,4 @@
+#!/bin/bash
 docker build -t client_python .
 
 docker image prune -f

@@ -1,0 +1,18 @@
+{
+  "defaults": {
+    "client_log": "/app/client_e2e.log",
+    "timeout_sec": 120
+  },
+  "groups": [
+    {
+      "name": "sequential_rotating",
+      "initial_delay_sec": 5,
+      "periodicity": 10,
+      "repetitions": "inf",
+      "send": {
+        "mode": "sequential",
+        "payload_files": ["3-nested-route.json"]
+      }
+    }
+  ]
+}

@@ -1,5 +1,6 @@
 //! HTTP pipeline (Rust) — W3C propagate, forward, opcjonalna trasa `route` w JSON.
 //! Segment: `processing_time` (legacy) albo niepusta `processing_steps`: `[{ "activity", "time" }, …]`
+//! lub krok z `nested_route` (tylko workery; pierwszy `id` ≠ `py`) + opcjonalne `time` (CPU przed POST).
 //! (spany `pipeline.processing` + podspany wg `activity`, jeden trace).
 //! Continuous profiling: ustaw ``PYROSCOPE_SERVER`` (np. ``http://pyroscope:4040``) — osobno od OTLP.
 use std::collections::HashMap;
@@ -46,7 +47,10 @@ use uuid::Uuid;
 struct ProcessingStep {
     #[serde(default)]
     activity: String,
+    #[serde(default)]
     time: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    nested_route: Option<Vec<RouteSeg>>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, Default)]
@@ -351,23 +355,70 @@ fn parse_processing_time(s: &Option<String>, cap: f64) -> Result<f64, String> {
     Ok(sec.min(cap))
 }
 
-fn parse_processing_steps(seg: &RouteSeg, cap: f64) -> Result<Option<Vec<(String, f64)>>, String> {
+enum ParsedStep {
+    Cpu {
+        activity: String,
+        sec: f64,
+        index: usize,
+    },
+    Nested {
+        activity: String,
+        pre_sec: f64,
+        route: Vec<RouteSeg>,
+        index: usize,
+    },
+}
+
+fn parse_processing_steps(seg: &RouteSeg, cap: f64) -> Result<Option<Vec<ParsedStep>>, String> {
     let steps = match &seg.processing_steps {
         Some(s) if !s.is_empty() => s,
         _ => return Ok(None),
     };
     let mut v = Vec::new();
     for (i, st) in steps.iter().enumerate() {
-        let sec = parse_processing_time(&Some(st.time.clone()), cap)?;
-        let act = {
-            let t = st.activity.trim();
-            if t.is_empty() {
-                format!("step_{i}")
-            } else {
-                st.activity.clone()
+        if let Some(nr) = &st.nested_route {
+            if nr.is_empty() {
+                return Err(format!(
+                    "processing_steps[{i}].nested_route must be non-empty"
+                ));
             }
-        };
-        v.push((act, sec));
+            let fid = nr[0].id.trim().to_lowercase();
+            if fid == "py" {
+                return Err(format!(
+                    "processing_steps[{i}].nested_route[0].id must not be 'py' (workers only)"
+                ));
+            }
+            let pre_sec = parse_processing_time(&Some(st.time.clone()), cap)?;
+            let act = {
+                let t = st.activity.trim();
+                if t.is_empty() {
+                    format!("step_{i}")
+                } else {
+                    st.activity.clone()
+                }
+            };
+            v.push(ParsedStep::Nested {
+                activity: act,
+                pre_sec,
+                route: nr.clone(),
+                index: i,
+            });
+        } else {
+            let sec = parse_processing_time(&Some(st.time.clone()), cap)?;
+            let act = {
+                let t = st.activity.trim();
+                if t.is_empty() {
+                    format!("step_{i}")
+                } else {
+                    st.activity.clone()
+                }
+            };
+            v.push(ParsedStep::Cpu {
+                activity: act,
+                sec,
+                index: i,
+            });
+        }
     }
     Ok(Some(v))
 }
@@ -381,7 +432,7 @@ fn span_name_for_activity(act: &str) -> String {
 }
 
 enum WorkPlan {
-    Steps(Vec<(String, f64)>),
+    Steps(Vec<ParsedStep>),
     Legacy(f64),
     None,
 }
@@ -413,6 +464,70 @@ fn peer_url<'a>(peers: &'a HashMap<String, String>, id: &str) -> Option<&'a Stri
     peers
         .get(&k.to_lowercase())
         .or_else(|| peers.get(k))
+}
+
+fn nested_pipeline_msg(route: &[RouteSeg]) -> PipelineMsg {
+    let mut r: Vec<RouteSeg> = route.to_vec();
+    for s in &mut r {
+        s.visited = false;
+    }
+    PipelineMsg {
+        route: r,
+        visit_log: vec![],
+        counter: "0".to_string(),
+        table_of_clients: vec![],
+    }
+}
+
+async fn post_nested_subpipeline(
+    st: &St,
+    nested_route: &[RouteSeg],
+    t: &impl Tracer,
+    step_cx: &Context,
+) -> Result<(), String> {
+    let first_id = nested_route[0].id.trim();
+    let url = peer_url(&st.peers, first_id)
+        .ok_or_else(|| format!("no peer URL for nested id {first_id:?}"))?
+        .clone();
+    let body_vec = serde_json::to_vec(&nested_pipeline_msg(nested_route))
+        .map_err(|e| e.to_string())?;
+    rs_line(&format!(
+        "[{}] nested_forward to {url}: {}",
+        st.id,
+        String::from_utf8_lossy(&body_vec)
+    ));
+    let forward = t
+        .span_builder("pipeline.nested_forward")
+        .with_kind(SpanKind::Client)
+        .start_with_context(t, step_cx);
+    let forward_cx = step_cx.clone().with_span(forward);
+    let mut hmap = http::HeaderMap::new();
+    global::get_text_map_propagator(|p| {
+        p.inject_context(&forward_cx, &mut HeaderInjector(&mut hmap))
+    });
+    let cl = reqwest::Client::new();
+    let mut rb = cl.post(&url).body(body_vec);
+    for (k, v) in hmap.iter() {
+        rb = rb.header(k, v);
+    }
+    rb = rb.header("content-type", "application/json");
+    let resp_fut = async {
+        let resp = rb.send().await.map_err(|e| e.to_string())?;
+        let c = resp.status();
+        let _txt = resp.text().await.map_err(|e| e.to_string())?;
+        Ok::<http::StatusCode, String>(http::StatusCode::from_u16(c.as_u16()).unwrap_or(
+            http::StatusCode::BAD_GATEWAY,
+        ))
+    }
+    .with_context(forward_cx);
+    let status = match resp_fut.await {
+        Ok(x) => x,
+        Err(e) => return Err(e),
+    };
+    if !status.is_success() {
+        return Err(format!("nested_forward HTTP {status}"));
+    }
+    Ok(())
 }
 
 async fn pipeline(
@@ -487,26 +602,68 @@ async fn route_mode(st: &St, parent: &Context, mut m: PipelineMsg) -> Response {
 
     match &plan {
         WorkPlan::Steps(steps) => {
-            let total: f64 = steps.iter().map(|(_, s)| *s).sum();
+            let cpu_sum: f64 = steps
+                .iter()
+                .map(|s| match s {
+                    ParsedStep::Cpu { sec, .. } => *sec,
+                    ParsedStep::Nested { pre_sec, .. } => *pre_sec,
+                })
+                .sum();
+            let has_nested = steps
+                .iter()
+                .any(|s| matches!(s, ParsedStep::Nested { .. }));
             let mut proc = t.start_with_context("pipeline.processing", &hop_cx);
             proc.set_attribute(KeyValue::new("demo.processing.mode", "steps"));
             proc.set_attribute(KeyValue::new(
                 "demo.step_count",
                 steps.len() as i64,
             ));
-            proc.set_attribute(KeyValue::new("demo.simulated_processing_sec", total));
+            proc.set_attribute(KeyValue::new("demo.simulated_processing_sec", cpu_sum));
+            proc.set_attribute(KeyValue::new("demo.has_nested_steps", has_nested));
             let proc_cx = hop_cx.clone().with_span(proc);
-            for (i, (act, sec)) in steps.iter().enumerate() {
-                let name = span_name_for_activity(act);
-                let mut step = t.start_with_context(name, &proc_cx);
-                step.set_attribute(KeyValue::new("demo.activity", act.clone()));
-                step.set_attribute(KeyValue::new("demo.cpu_spin_sec", *sec));
-                step.set_attribute(KeyValue::new("demo.step_index", i as i64));
-                let step_cx = proc_cx.clone().with_span(step);
-                if *sec > 0.0 {
-                    async { spin_cpu_seconds(*sec).await }
-                        .with_context(step_cx.clone())
-                        .await;
+            for step in steps.iter() {
+                match step {
+                    ParsedStep::Cpu {
+                        activity: act,
+                        sec,
+                        index: i,
+                    } => {
+                        let name = span_name_for_activity(act);
+                        let mut step_sp = t.start_with_context(name.as_str(), &proc_cx);
+                        step_sp.set_attribute(KeyValue::new("demo.activity", act.clone()));
+                        step_sp.set_attribute(KeyValue::new("demo.cpu_spin_sec", *sec));
+                        step_sp.set_attribute(KeyValue::new("demo.step_index", *i as i64));
+                        let step_cx = proc_cx.clone().with_span(step_sp);
+                        if *sec > 0.0 {
+                            async { spin_cpu_seconds(*sec).await }
+                                .with_context(step_cx.clone())
+                                .await;
+                        }
+                    }
+                    ParsedStep::Nested {
+                        activity: act,
+                        pre_sec,
+                        route,
+                        index: i,
+                    } => {
+                        let name = span_name_for_activity(act);
+                        let mut step_sp = t.start_with_context(name.as_str(), &proc_cx);
+                        step_sp.set_attribute(KeyValue::new("demo.activity", act.clone()));
+                        step_sp.set_attribute(KeyValue::new("demo.cpu_spin_sec", *pre_sec));
+                        step_sp.set_attribute(KeyValue::new("demo.step_index", *i as i64));
+                        step_sp.set_attribute(KeyValue::new("demo.nested_subpipeline", true));
+                        let step_cx = proc_cx.clone().with_span(step_sp);
+                        if *pre_sec > 0.0 {
+                            async { spin_cpu_seconds(*pre_sec).await }
+                                .with_context(step_cx.clone())
+                                .await;
+                        }
+                        if let Err(e) =
+                            post_nested_subpipeline(st, route.as_slice(), t, &step_cx).await
+                        {
+                            return (StatusCode::BAD_GATEWAY, e).into_response();
+                        }
+                    }
                 }
             }
         }

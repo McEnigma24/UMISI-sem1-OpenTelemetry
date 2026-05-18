@@ -14,12 +14,10 @@ processors:
 exporters:
   debug:
     verbosity: detailed
-  # Jaeger all-in-one: odbiornik OTLP gRPC (sieć Docker: host jaeger, port 4317)
   otlp/jaeger:
     endpoint: jaeger:4317
     tls:
       insecure: true
-  # Grafana „Drilldown / Traces” wymaga Tempo — Jaeger zostaje do UI http://localhost:16686
   otlp/tempo:
     endpoint: tempo:4317
     tls:

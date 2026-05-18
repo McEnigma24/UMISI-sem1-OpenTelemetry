@@ -1,12 +1,12 @@
 # Jak clients/cpp:
 #   • runtime-base — minimalny runtime
-#   • dev-env — toolchain Rust (workflow z volumenem: ./docker_build)
+#   • dev-env — toolchain Rust (workflow z volumenem: ./docker_build.sh)
 #   • builder — ZERO COPY źródeł; montujesz repo: -v "$(pwd):/workspace", potem ./Docker_start.sh
 #   • compile — pełna kompilacja w obrazie (docker compose build — zawsze świeży kod, m.in. propagator W3C)
 #   • runner — binarka z etapu compile (compose) albo z ./docker-target (stary skrypt na hoście)
 #
 # Workflow lokalny (volumen):
-#   cd clients/rust && ./docker_build
+#   cd clients/rust && ./docker_build.sh
 #
 # Workflow compose (bez hostowego cargo):
 #   docker compose build client-rust
@@ -30,7 +30,7 @@ WORKDIR /workspace
 ENV CARGO_TARGET_DIR=/workspace/docker-target
 
 # ==========================================
-# 3. BUILDER — źródła wyłącznie z volumenu (patrz docker_build)
+# 3. BUILDER — źródła wyłącznie z volumenu (patrz docker_build.sh)
 # ==========================================
 FROM dev-env AS builder
 # Skrypt jest tylko na volumenie /workspace — wywołanie przez bash (bez chmod +x na bind-mount).
