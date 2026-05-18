@@ -1,4 +1,5 @@
 #!/bin/bash
+clear
 set -euo pipefail
 # Uruchamiaj z katalogu UMISI-sem1-OpenTelemetry (tak jak compose_run).
 

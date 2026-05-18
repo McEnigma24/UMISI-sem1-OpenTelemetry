@@ -28,6 +28,7 @@ using Microsoft.Extensions.Logging;
 using OpenTelemetry;
 using OpenTelemetry.Context.Propagation;
 using OpenTelemetry.Exporter;
+using OpenTelemetry.Logs;
 using OpenTelemetry.Metrics;
 using OpenTelemetry.Resources;
 using OpenTelemetry.Trace;
@@ -37,6 +38,7 @@ namespace OtelDemo;
 public static class Program
 {
     private static readonly ActivitySource Act = new("worker_csharp", "1.0.0");
+    private static ILogger? s_pipelineLog;
     /// <summary>Żyjący uchwyt do bieżącego procesu — nie używamy <c>using</c> na <see cref="Process.GetCurrentProcess"/>,
     /// bo zwalnianie psuje kolejne odczyty metryk.</summary>
     private static readonly Process s_metricProcess = Process.GetCurrentProcess();
@@ -50,7 +52,12 @@ public static class Program
         TypeInfoResolver = new DefaultJsonTypeInfoResolver(),
     };
 
-    private static void CsLine(string m) => Console.WriteLine($"{DateTime.Now:HH:mm:ss.fff} {m}");
+    private static void CsLine(string m)
+    {
+        var line = $"{DateTime.Now:HH:mm:ss.fff} {m}";
+        Console.WriteLine(line);
+        s_pipelineLog?.LogWarning("{Line}", line);
+    }
 
     private static bool PyroscopePushLogLineEnabled()
     {
@@ -117,8 +124,17 @@ public static class Program
     }
 
     private static bool UseOtlp() => GetLo("OTEL_DEMO_TRACE_EXPORT", "") is "" or "otlp" or "http";
+    private static bool UseOtlLogExport()
+    {
+        if (!UseOtlp())
+            return false;
+        var v = GetLo("OTEL_DEMO_LOG_EXPORT", "otlp").Trim().ToLowerInvariant();
+        return v is not ("0" or "false" or "no" or "off");
+    }
+
     private static string TrEp() => GetLo("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://127.0.0.1:4318/v1/traces");
     private static string MxEp() => GetLo("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", TrEp().Replace("/v1/traces", "/v1/metrics", StringComparison.Ordinal));
+    private static string LogEp() => GetLo("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", TrEp().Replace("/v1/traces", "/v1/logs", StringComparison.Ordinal));
 
     private static double MaxProcSec() =>
         double.TryParse(GetLo("DEMO_MAX_PROCESSING_SEC", "120"), CultureInfo.InvariantCulture, out var x)
@@ -297,6 +313,19 @@ public static class Program
         return act.Length <= 256 ? act : act[..256];
     }
 
+    private static string? RouteSegmentSchemaError(JsonObject seg, string where)
+    {
+        if (seg.ContainsKey("processing_time"))
+        {
+            return $"{where}: field 'processing_time' is not supported; use non-empty 'processing_steps' with {{\"activity\",\"time\"}}";
+        }
+
+        if (seg["processing_steps"] is not JsonArray ps || ps.Count == 0)
+            return $"{where}: non-empty 'processing_steps' is required";
+
+        return null;
+    }
+
     private static string? ValidateNestedRoute(JsonArray nested, int stepIndex)
     {
         if (nested.Count == 0)
@@ -307,6 +336,16 @@ public static class Program
             return $"processing_steps[{stepIndex}].nested_route[0].id must be non-empty";
         if (fid.Trim().Equals("py", StringComparison.OrdinalIgnoreCase))
             return $"processing_steps[{stepIndex}].nested_route[0].id must not be 'py' (workers only)";
+        for (var j = 0; j < nested.Count; j++)
+        {
+            var sjo = nested[j]?.AsObject();
+            if (sjo is null)
+                return $"processing_steps[{stepIndex}].nested_route[{j}] must be an object";
+            var err = RouteSegmentSchemaError(sjo, $"processing_steps[{stepIndex}].nested_route[{j}]");
+            if (err is not null)
+                return err;
+        }
+
         return null;
     }
 
@@ -433,7 +472,8 @@ public static class Program
                     if (category is null)
                         return true;
                     if (category.Contains("OtlpTraceExporter", StringComparison.Ordinal)
-                        || category.Contains("OtlpMetricExporter", StringComparison.Ordinal))
+                        || category.Contains("OtlpMetricExporter", StringComparison.Ordinal)
+                        || category.Contains("OtlpLogExporter", StringComparison.Ordinal))
                         return level >= LogLevel.Warning;
                     return true;
                 });
@@ -441,6 +481,19 @@ public static class Program
         else
         {
             builder.Logging.AddFilter("Microsoft.AspNetCore", LogLevel.Warning);
+        }
+
+        if (UseOtlp() && UseOtlLogExport())
+        {
+            builder.Logging.AddOpenTelemetry(logging =>
+            {
+                logging.SetResourceBuilder(ResB());
+                logging.AddOtlpExporter(o =>
+                {
+                    o.Endpoint = new Uri(LogEp());
+                    o.Protocol = OtlpExportProtocol.HttpProtobuf;
+                });
+            });
         }
 
         builder.Services.AddHttpClient();
@@ -510,6 +563,7 @@ public static class Program
         }
 
         var app = builder.Build();
+        s_pipelineLog = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("demo.pipeline");
         var path = pipelinePath;
         var cid = GetLo("DEMO_CLIENT_ID", "cs");
         var peers = LoadPeerMap();
@@ -607,116 +661,94 @@ public static class Program
                 $"first unvisited route segment id must match this node (expected {cid}, got {segId})");
         }
 
-        if (seg["processing_steps"] is JsonArray stepsArr && stepsArr.Count > 0)
-        {
-            var parsed = new List<(string Act, double Spin, JsonArray? Nested)>();
-            for (var i = 0; i < stepsArr.Count; i++)
-            {
-                var o = stepsArr[i]?.AsObject();
-                if (o is null)
-                    return Results.BadRequest($"processing_steps[{i}] must be an object");
-                var act = o["activity"]?.GetValue<string>() ?? $"step_{i}";
-                if (o["nested_route"] is JsonArray nr && nr.Count > 0)
-                {
-                    var verr = ValidateNestedRoute(nr, i);
-                    if (verr is not null)
-                        return Results.BadRequest(verr);
-                    if (!TryParseProcessing(o["time"]?.GetValue<string>(), maxProc, out var pre, out var perr2))
-                        return Results.BadRequest(perr2 ?? $"processing_steps[{i}].time invalid");
-                    parsed.Add((act, pre, nr));
-                }
-                else
-                {
-                    if (!TryParseProcessing(o["time"]?.GetValue<string>(), maxProc, out var sec, out var perr))
-                        return Results.BadRequest(perr ?? $"processing_steps[{i}].time invalid");
-                    parsed.Add((act, sec, null));
-                }
-            }
+        var topSchema = RouteSegmentSchemaError(seg, "route segment");
+        if (topSchema is not null)
+            return Results.BadRequest(topSchema);
 
-            var cpuSum = parsed.Sum(x => x.Spin);
-            var hasNested = parsed.Any(x => x.Nested is not null);
-            hopAct?.SetTag("demo.simulated_processing_sec", cpuSum);
-            hopAct?.SetTag("demo.processing.mode", "steps");
-            hopAct?.SetTag("demo.step_count", parsed.Count);
-            hopAct?.SetTag("demo.has_nested_steps", hasNested);
-            using (Act.StartActivity("pipeline.processing", ActivityKind.Internal))
+        var stepsArr = (JsonArray)seg["processing_steps"]!;
+        var parsed = new List<(string Act, double Spin, JsonArray? Nested)>();
+        for (var i = 0; i < stepsArr.Count; i++)
+        {
+            var o = stepsArr[i]?.AsObject();
+            if (o is null)
+                return Results.BadRequest($"processing_steps[{i}] must be an object");
+            var act = o["activity"]?.GetValue<string>() ?? $"step_{i}";
+            if (o["nested_route"] is JsonArray nr && nr.Count > 0)
             {
-                for (var i = 0; i < parsed.Count; i++)
+                var verr = ValidateNestedRoute(nr, i);
+                if (verr is not null)
+                    return Results.BadRequest(verr);
+                if (!TryParseProcessing(o["time"]?.GetValue<string>(), maxProc, out var pre, out var perr2))
+                    return Results.BadRequest(perr2 ?? $"processing_steps[{i}].time invalid");
+                parsed.Add((act, pre, nr));
+            }
+            else
+            {
+                if (!TryParseProcessing(o["time"]?.GetValue<string>(), maxProc, out var sec, out var perr))
+                    return Results.BadRequest(perr ?? $"processing_steps[{i}].time invalid");
+                parsed.Add((act, sec, null));
+            }
+        }
+
+        var cpuSum = parsed.Sum(x => x.Spin);
+        var hasNested = parsed.Any(x => x.Nested is not null);
+        hopAct?.SetTag("demo.simulated_processing_sec", cpuSum);
+        hopAct?.SetTag("demo.processing.mode", "steps");
+        hopAct?.SetTag("demo.step_count", parsed.Count);
+        hopAct?.SetTag("demo.has_nested_steps", hasNested);
+        using (Act.StartActivity("pipeline.processing", ActivityKind.Internal))
+        {
+            for (var i = 0; i < parsed.Count; i++)
+            {
+                var (act, spin, nested) = parsed[i];
+                var name = ActivityNameFromActivity(act);
+                using (Act.StartActivity(name, ActivityKind.Internal))
                 {
-                    var (act, spin, nested) = parsed[i];
-                    var name = ActivityNameFromActivity(act);
-                    using (Act.StartActivity(name, ActivityKind.Internal))
+                    Activity.Current?.SetTag("demo.activity", act);
+                    Activity.Current?.SetTag("demo.cpu_spin_sec", spin);
+                    Activity.Current?.SetTag("demo.step_index", i);
+                    if (nested is not null)
+                        Activity.Current?.SetTag("demo.nested_subpipeline", true);
+                    if (spin > 0)
+                        await Task.Run(() => CpuSpinForSeconds(spin));
+                    if (nested is not null)
                     {
-                        Activity.Current?.SetTag("demo.activity", act);
-                        Activity.Current?.SetTag("demo.cpu_spin_sec", spin);
-                        Activity.Current?.SetTag("demo.step_index", i);
-                        if (nested is not null)
-                            Activity.Current?.SetTag("demo.nested_subpipeline", true);
-                        if (spin > 0)
-                            await Task.Run(() => CpuSpinForSeconds(spin));
-                        if (nested is not null)
+                        var clone = CloneRouteWithVisitedFalse(nested);
+                        var rootNest = BuildNestedPipelineRoot(clone);
+                        var firstSeg = nested[0]?.AsObject();
+                        var firstId = firstSeg?["id"]?.GetValue<string>()?.Trim();
+                        if (string.IsNullOrWhiteSpace(firstId))
+                            return Results.BadRequest($"processing_steps[{i}].nested_route[0].id empty");
+                        var nestedPeerKey = firstId.Trim().ToLowerInvariant();
+                        if (!peers.TryGetValue(nestedPeerKey, out var nurl))
                         {
-                            var clone = CloneRouteWithVisitedFalse(nested);
-                            var rootNest = BuildNestedPipelineRoot(clone);
-                            var firstSeg = nested[0]?.AsObject();
-                            var firstId = firstSeg?["id"]?.GetValue<string>()?.Trim();
-                            if (string.IsNullOrWhiteSpace(firstId))
-                                return Results.BadRequest($"processing_steps[{i}].nested_route[0].id empty");
-                            var nestedPeerKey = firstId.Trim().ToLowerInvariant();
-                            if (!peers.TryGetValue(nestedPeerKey, out var nurl))
+                            return Results.Json(
+                                new { error = $"no peer URL for nested id {firstId}" },
+                                statusCode: 502);
+                        }
+
+                        var nestJson = NodeToJsonString(rootNest);
+                        CsLine($"[{cid}] nested_forward to {nurl}: {nestJson}");
+                        using (Act.StartActivity("pipeline.nested_forward", ActivityKind.Client))
+                        {
+                            Activity.Current?.SetTag("http.url", nurl);
+                            var client = httpFactory.CreateClient();
+                            using var req = new HttpRequestMessage(HttpMethod.Post, nurl)
+                            {
+                                Content = new StringContent(nestJson, Encoding.UTF8, "application/json"),
+                            };
+                            req.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+                            var resp = await client.SendAsync(req);
+                            Activity.Current?.SetTag("demo.downstream_status", (int)resp.StatusCode);
+                            if (!resp.IsSuccessStatusCode)
                             {
                                 return Results.Json(
-                                    new { error = $"no peer URL for nested id {firstId}" },
+                                    new { error = $"nested_forward HTTP {(int)resp.StatusCode}" },
                                     statusCode: 502);
-                            }
-
-                            var nestJson = NodeToJsonString(rootNest);
-                            CsLine($"[{cid}] nested_forward to {nurl}: {nestJson}");
-                            using (Act.StartActivity("pipeline.nested_forward", ActivityKind.Client))
-                            {
-                                Activity.Current?.SetTag("http.url", nurl);
-                                var client = httpFactory.CreateClient();
-                                using var req = new HttpRequestMessage(HttpMethod.Post, nurl)
-                                {
-                                    Content = new StringContent(nestJson, Encoding.UTF8, "application/json"),
-                                };
-                                req.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
-                                var resp = await client.SendAsync(req);
-                                Activity.Current?.SetTag("demo.downstream_status", (int)resp.StatusCode);
-                                if (!resp.IsSuccessStatusCode)
-                                {
-                                    return Results.Json(
-                                        new { error = $"nested_forward HTTP {(int)resp.StatusCode}" },
-                                        statusCode: 502);
-                                }
                             }
                         }
                     }
                 }
-            }
-        }
-        else
-        {
-            var pt = seg["processing_time"]?.GetValue<string>();
-            if (!TryParseProcessing(pt, maxProc, out var sleepSec, out var perr))
-                return Results.BadRequest(perr ?? "invalid processing_time");
-
-            if (sleepSec > 0)
-            {
-                hopAct?.SetTag("demo.simulated_processing_sec", sleepSec);
-                hopAct?.SetTag("demo.processing.mode", "single");
-                using (Act.StartActivity("pipeline.processing", ActivityKind.Internal))
-                {
-                    using (Act.StartActivity("pipeline.simulated_work", ActivityKind.Internal))
-                    {
-                        Activity.Current?.SetTag("demo.cpu_spin_sec", sleepSec);
-                        await Task.Run(() => CpuSpinForSeconds(sleepSec));
-                    }
-                }
-            }
-            else
-            {
-                hopAct?.SetTag("demo.processing.mode", "none");
             }
         }
 

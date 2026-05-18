@@ -1,11 +1,10 @@
 //! HTTP pipeline (Rust) — W3C propagate, forward, opcjonalna trasa `route` w JSON.
-//! Segment: `processing_time` (legacy) albo niepusta `processing_steps`: `[{ "activity", "time" }, …]`
-//! lub krok z `nested_route` (tylko workery; pierwszy `id` ≠ `py`) + opcjonalne `time` (CPU przed POST).
-//! (spany `pipeline.processing` + podspany wg `activity`, jeden trace).
+//! Segment: niepusta `processing_steps`: `[{ "activity", "time" }, …]` lub krok z `nested_route` …
 //! Continuous profiling: ustaw ``PYROSCOPE_SERVER`` (np. ``http://pyroscope:4040``) — osobno od OTLP.
 use std::collections::HashMap;
 use std::env;
 use std::net::SocketAddr;
+use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -18,21 +17,24 @@ use axum::response::Response;
 use axum::routing::post;
 use axum::Router;
 use opentelemetry::metrics::{Counter, Histogram};
-use opentelemetry::global::{self, BoxedTracer};
+use opentelemetry::global::{self};
+use opentelemetry::logs::{AnyValue, LogRecord, Logger, LoggerProvider, Severity};
 use opentelemetry::trace::FutureExt;
+use opentelemetry::trace::Span;
 use opentelemetry::trace::SpanKind;
 use opentelemetry::trace::TraceContextExt;
 use opentelemetry::trace::Tracer;
-use opentelemetry::trace::Span;
 use opentelemetry::Context;
 use opentelemetry::InstrumentationScope;
 use opentelemetry::KeyValue;
 use opentelemetry_http::HeaderExtractor;
 use opentelemetry_http::HeaderInjector;
+use opentelemetry_otlp::LogExporter;
 use opentelemetry_otlp::MetricExporter;
 use opentelemetry_otlp::Protocol;
 use opentelemetry_otlp::SpanExporter;
 use opentelemetry_otlp::WithExportConfig;
+use opentelemetry_sdk::logs::SdkLoggerProvider;
 use opentelemetry_sdk::metrics::SdkMeterProvider;
 use opentelemetry_sdk::propagation::TraceContextPropagator;
 use opentelemetry_sdk::trace::SdkTracerProvider;
@@ -42,6 +44,9 @@ use serde::Serialize;
 use sysinfo::{Pid, ProcessesToUpdate, System};
 use tokio::net::TcpListener;
 use uuid::Uuid;
+
+/// W OTel Rust 0.31 usunięto `global::logger` / `global::set_logger_provider` — jedna instancja na proces.
+static OTLP_LOG_PROVIDER: OnceLock<SdkLoggerProvider> = OnceLock::new();
 
 #[derive(Deserialize, Serialize, Clone, Debug, Default)]
 struct ProcessingStep {
@@ -122,6 +127,15 @@ impl Drop for HopDurationGuard {
 fn rs_line(s: &str) {
     let ts = chrono::Local::now().format("%H:%M:%S%.3f");
     println!("{ts} {s}");
+    if use_otlp_log_export() {
+        if let Some(lp) = OTLP_LOG_PROVIDER.get() {
+            let logger = lp.logger("demo.pipeline");
+            let mut rec = logger.create_log_record();
+            rec.set_body(AnyValue::from(format!("{ts} {s}")));
+            rec.set_severity_number(Severity::Info);
+            logger.emit(rec);
+        }
+    }
 }
 
 fn use_otlp() -> bool {
@@ -168,6 +182,52 @@ fn metrics_otlp_endpoint() -> String {
     let traces = env::var("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
         .unwrap_or_else(|_| "http://127.0.0.1:4318/v1/traces".to_string());
     traces.replace("/v1/traces", "/v1/metrics")
+}
+
+fn otlp_logs_endpoint() -> String {
+    if let Ok(e) = env::var("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT") {
+        let t = e.trim();
+        if !t.is_empty() {
+            return t.to_string();
+        }
+    }
+    let traces = env::var("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
+        .unwrap_or_else(|_| "http://127.0.0.1:4318/v1/traces".to_string());
+    traces.replace("/v1/traces", "/v1/logs")
+}
+
+fn use_otlp_log_export() -> bool {
+    if !use_otlp() {
+        return false;
+    }
+    let v = env::var("OTEL_DEMO_LOG_EXPORT").unwrap_or_else(|_| "otlp".to_string());
+    !matches!(v.to_lowercase().as_str(), "0" | "false" | "no" | "off")
+}
+
+fn init_otlp_logs() {
+    if !use_otlp() || !use_otlp_log_export() {
+        return;
+    }
+    let ep = otlp_logs_endpoint();
+    let exporter = match LogExporter::builder()
+        .with_http()
+        .with_protocol(Protocol::HttpJson)
+        .with_endpoint(ep.as_str())
+        .build()
+    {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("otlp log exporter: {e}");
+            return;
+        }
+    };
+    let lp = SdkLoggerProvider::builder()
+        .with_resource(resource())
+        .with_batch_exporter(exporter)
+        .build();
+    if OTLP_LOG_PROVIDER.set(lp).is_err() {
+        eprintln!("otlp log provider: already initialized");
+    }
 }
 
 fn process_metrics_enabled() -> bool {
@@ -388,6 +448,11 @@ fn parse_processing_steps(seg: &RouteSeg, cap: f64) -> Result<Option<Vec<ParsedS
                     "processing_steps[{i}].nested_route[0].id must not be 'py' (workers only)"
                 ));
             }
+            for (j, sub) in nr.iter().enumerate() {
+                route_segment_schema(sub).map_err(|e| {
+                    format!("processing_steps[{i}].nested_route[{j}]: {e}")
+                })?;
+            }
             let pre_sec = parse_processing_time(&Some(st.time.clone()), cap)?;
             let act = {
                 let t = st.activity.trim();
@@ -423,6 +488,19 @@ fn parse_processing_steps(seg: &RouteSeg, cap: f64) -> Result<Option<Vec<ParsedS
     Ok(Some(v))
 }
 
+fn route_segment_schema(seg: &RouteSeg) -> Result<(), String> {
+    if seg.processing_time.is_some() {
+        return Err(
+            "field 'processing_time' is not supported; use non-empty 'processing_steps' with {\"activity\",\"time\"}"
+                .to_string(),
+        );
+    }
+    match &seg.processing_steps {
+        Some(s) if !s.is_empty() => Ok(()),
+        _ => Err("non-empty 'processing_steps' is required".to_string()),
+    }
+}
+
 fn span_name_for_activity(act: &str) -> String {
     let t = act.trim();
     if t.is_empty() {
@@ -431,22 +509,11 @@ fn span_name_for_activity(act: &str) -> String {
     t.chars().take(256).collect()
 }
 
-enum WorkPlan {
-    Steps(Vec<ParsedStep>),
-    Legacy(f64),
-    None,
-}
-
-fn work_plan_for_segment(seg: &RouteSeg, cap: f64) -> Result<WorkPlan, String> {
-    if let Some(parsed) = parse_processing_steps(seg, cap)? {
-        return Ok(WorkPlan::Steps(parsed));
-    }
-    let dur = parse_processing_time(&seg.processing_time, cap)?;
-    if dur > 0.0 {
-        Ok(WorkPlan::Legacy(dur))
-    } else {
-        Ok(WorkPlan::None)
-    }
+fn work_plan_for_segment(seg: &RouteSeg, cap: f64) -> Result<Vec<ParsedStep>, String> {
+    route_segment_schema(seg)?;
+    parse_processing_steps(seg, cap)?.ok_or_else(|| {
+        "non-empty 'processing_steps' is required".to_string()
+    })
 }
 
 fn first_unvisited(route: &[RouteSeg]) -> Option<usize> {
@@ -479,12 +546,16 @@ fn nested_pipeline_msg(route: &[RouteSeg]) -> PipelineMsg {
     }
 }
 
-async fn post_nested_subpipeline(
+async fn post_nested_subpipeline<T>(
     st: &St,
     nested_route: &[RouteSeg],
-    t: &BoxedTracer,
+    t: &T,
     step_cx: &Context,
-) -> Result<(), String> {
+) -> Result<(), String>
+where
+    T: Tracer,
+    <T as Tracer>::Span: Send + Sync + 'static,
+{
     let first_id = nested_route[0].id.trim();
     let url = peer_url(&st.peers, first_id)
         .ok_or_else(|| format!("no peer URL for nested id {first_id:?}"))?
@@ -589,7 +660,7 @@ async fn route_mode(st: &St, parent: &Context, mut m: PipelineMsg) -> Response {
         )
             .into_response();
     }
-    let plan = match work_plan_for_segment(&m.route[idx], st.max_proc) {
+    let steps = match work_plan_for_segment(&m.route[idx], st.max_proc) {
         Ok(p) => p,
         Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
     };
@@ -600,86 +671,71 @@ async fn route_mode(st: &St, parent: &Context, mut m: PipelineMsg) -> Response {
         .start_with_context(&t, parent);
     let hop_cx = parent.clone().with_span(hop);
 
-    match &plan {
-        WorkPlan::Steps(steps) => {
-            let cpu_sum: f64 = steps
-                .iter()
-                .map(|s| match s {
-                    ParsedStep::Cpu { sec, .. } => *sec,
-                    ParsedStep::Nested { pre_sec, .. } => *pre_sec,
-                })
-                .sum();
-            let has_nested = steps
-                .iter()
-                .any(|s| matches!(s, ParsedStep::Nested { .. }));
-            let mut proc = t.start_with_context("pipeline.processing", &hop_cx);
-            proc.set_attribute(KeyValue::new("demo.processing.mode", "steps"));
-            proc.set_attribute(KeyValue::new(
-                "demo.step_count",
-                steps.len() as i64,
-            ));
-            proc.set_attribute(KeyValue::new("demo.simulated_processing_sec", cpu_sum));
-            proc.set_attribute(KeyValue::new("demo.has_nested_steps", has_nested));
-            let proc_cx = hop_cx.clone().with_span(proc);
-            for step in steps.iter() {
-                match step {
-                    ParsedStep::Cpu {
-                        activity: act,
-                        sec,
-                        index: i,
-                    } => {
-                        let name = span_name_for_activity(act);
-                        let mut step_sp = t.start_with_context(name, &proc_cx);
-                        step_sp.set_attribute(KeyValue::new("demo.activity", act.clone()));
-                        step_sp.set_attribute(KeyValue::new("demo.cpu_spin_sec", *sec));
-                        step_sp.set_attribute(KeyValue::new("demo.step_index", *i as i64));
-                        let step_cx = proc_cx.clone().with_span(step_sp);
-                        if *sec > 0.0 {
-                            async { spin_cpu_seconds(*sec).await }
-                                .with_context(step_cx.clone())
-                                .await;
-                        }
+    {
+        let cpu_sum: f64 = steps
+            .iter()
+            .map(|s| match s {
+                ParsedStep::Cpu { sec, .. } => *sec,
+                ParsedStep::Nested { pre_sec, .. } => *pre_sec,
+            })
+            .sum();
+        let has_nested = steps
+            .iter()
+            .any(|s| matches!(s, ParsedStep::Nested { .. }));
+        let mut proc = t.start_with_context("pipeline.processing", &hop_cx);
+        proc.set_attribute(KeyValue::new("demo.processing.mode", "steps"));
+        proc.set_attribute(KeyValue::new(
+            "demo.step_count",
+            steps.len() as i64,
+        ));
+        proc.set_attribute(KeyValue::new("demo.simulated_processing_sec", cpu_sum));
+        proc.set_attribute(KeyValue::new("demo.has_nested_steps", has_nested));
+        let proc_cx = hop_cx.clone().with_span(proc);
+        for step in steps.iter() {
+            match step {
+                ParsedStep::Cpu {
+                    activity: act,
+                    sec,
+                    index: i,
+                } => {
+                    let name = span_name_for_activity(act);
+                    let mut step_sp = t.start_with_context(name, &proc_cx);
+                    step_sp.set_attribute(KeyValue::new("demo.activity", act.clone()));
+                    step_sp.set_attribute(KeyValue::new("demo.cpu_spin_sec", *sec));
+                    step_sp.set_attribute(KeyValue::new("demo.step_index", *i as i64));
+                    let step_cx = proc_cx.clone().with_span(step_sp);
+                    if *sec > 0.0 {
+                        async { spin_cpu_seconds(*sec).await }
+                            .with_context(step_cx.clone())
+                            .await;
                     }
-                    ParsedStep::Nested {
-                        activity: act,
-                        pre_sec,
-                        route,
-                        index: i,
-                    } => {
-                        let name = span_name_for_activity(act);
-                        let mut step_sp = t.start_with_context(name, &proc_cx);
-                        step_sp.set_attribute(KeyValue::new("demo.activity", act.clone()));
-                        step_sp.set_attribute(KeyValue::new("demo.cpu_spin_sec", *pre_sec));
-                        step_sp.set_attribute(KeyValue::new("demo.step_index", *i as i64));
-                        step_sp.set_attribute(KeyValue::new("demo.nested_subpipeline", true));
-                        let step_cx = proc_cx.clone().with_span(step_sp);
-                        if *pre_sec > 0.0 {
-                            async { spin_cpu_seconds(*pre_sec).await }
-                                .with_context(step_cx.clone())
-                                .await;
-                        }
-                        if let Err(e) =
-                            post_nested_subpipeline(st, route.as_slice(), &t, &step_cx).await
-                        {
-                            return (StatusCode::BAD_GATEWAY, e).into_response();
-                        }
+                }
+                ParsedStep::Nested {
+                    activity: act,
+                    pre_sec,
+                    route,
+                    index: i,
+                } => {
+                    let name = span_name_for_activity(act);
+                    let mut step_sp = t.start_with_context(name, &proc_cx);
+                    step_sp.set_attribute(KeyValue::new("demo.activity", act.clone()));
+                    step_sp.set_attribute(KeyValue::new("demo.cpu_spin_sec", *pre_sec));
+                    step_sp.set_attribute(KeyValue::new("demo.step_index", *i as i64));
+                    step_sp.set_attribute(KeyValue::new("demo.nested_subpipeline", true));
+                    let step_cx = proc_cx.clone().with_span(step_sp);
+                    if *pre_sec > 0.0 {
+                        async { spin_cpu_seconds(*pre_sec).await }
+                            .with_context(step_cx.clone())
+                            .await;
+                    }
+                    if let Err(e) =
+                        post_nested_subpipeline(st, route.as_slice(), &t, &step_cx).await
+                    {
+                        return (StatusCode::BAD_GATEWAY, e).into_response();
                     }
                 }
             }
         }
-        WorkPlan::Legacy(dur) => {
-            let mut proc = t.start_with_context("pipeline.processing", &hop_cx);
-            proc.set_attribute(KeyValue::new("demo.processing.mode", "single"));
-            proc.set_attribute(KeyValue::new("demo.simulated_processing_sec", *dur));
-            let proc_cx = hop_cx.clone().with_span(proc);
-            let mut sw = t.start_with_context("pipeline.simulated_work", &proc_cx);
-            sw.set_attribute(KeyValue::new("demo.cpu_spin_sec", *dur));
-            let sw_cx = proc_cx.clone().with_span(sw);
-            async { spin_cpu_seconds(*dur).await }
-                .with_context(sw_cx.clone())
-                .await;
-        }
-        WorkPlan::None => {}
     }
 
     m.route[idx].visited = true;
@@ -848,6 +904,7 @@ async fn main() {
     } else {
         None
     };
+    init_otlp_logs();
     let meter = global::meter_with_scope(
         InstrumentationScope::builder("worker_rust")
             .with_version("1.0.0")

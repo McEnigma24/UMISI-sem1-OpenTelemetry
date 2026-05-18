@@ -4,25 +4,27 @@ Pipeline HTTP: POST /v1/pipeline (JSON).
 
 Payload musi zawierać niepustą listę ``route`` (pierwszy segment = gateway, np. ``py``):
   Każdy węzeł obsługuje pierwszy nieodwiedzony segment z ``id`` == DEMO_CLIENT_ID,
-  symuluje pracę CPU (pętla obliczeń) przez ``processing_time`` lub ``processing_steps`` …
+  symuluje pracę CPU (pętla obliczeń) przez niepustą listę ``processing_steps`` …
   (wspólny span ``pipeline.processing``, podspany o nazwie ``activity`` — jeden traceId).
   Opcja ``nested_route`` w elemencie ``processing_steps``: osobny POST na pierwszego workera
   (pierwszy ``id`` ≠ ``py``), propagacja W3C z bieżącego kroku; opcjonalne ``time`` = CPU przed nested.
   Oznacza visited, aktualizuje counter/table/visit_log, forward wg DEMO_PEER_* / DEMO_PEER_MAP.
 
-OTLP: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT, opcj. metryki.
+OTLP: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT, opcj. metryki i logi (``OTEL_EXPORTER_OTLP_LOGS_ENDPOINT``).
 
 Demo ENV:
   DEMO_HTTP_ADDR, DEMO_HTTP_PATH, DEMO_CLIENT_ID
   DEMO_PEER_PY, DEMO_PEER_RS, DEMO_PEER_CS — URL pełny do pipeline (lub DEMO_PEER_MAP jako JSON obiekt id->url)
   DEMO_MAX_PROCESSING_SEC — limit czasu symulacji CPU (domyślnie 120)
   DEMO_PROCESS_METRICS — false/0: bez gauge'y demo.process.* (domyślnie włączone; punkty mają service.name + demo.client_id)
+  OTEL_DEMO_LOG_EXPORT — off/0/false: bez eksportu logów OTLP (domyślnie otlp przy włączonym OTLP trace)
   PYROSCOPE_SERVER — np. ``http://pyroscope:4040`` → continuous profiling (stosy CPU) do Grafana Pyroscope; osobno od OTLP metryk.
   PYROSCOPE_ENABLED — false/0: nie startuj ``pyroscope-io`` mimo ustawionego ``PYROSCOPE_SERVER``.
 """
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import socket
@@ -39,14 +41,18 @@ from urllib import request as urlrequest
 import psutil
 
 from opentelemetry import metrics, trace
+from opentelemetry._logs import set_logger_provider
 from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
 from opentelemetry import context as otel_context
 from opentelemetry.propagate import extract, inject, set_global_textmap
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 from opentelemetry.metrics import Observation
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
+from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
+from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
@@ -54,6 +60,7 @@ from opentelemetry.sdk.trace.sampling import ALWAYS_ON
 
 _TRACER: trace.Tracer | None = None
 _METER: metrics.Meter | None = None
+_LOG_PROVIDER: LoggerProvider | None = None
 
 
 class _ReusableThreadingHTTPServer(ThreadingHTTPServer):
@@ -63,7 +70,10 @@ class _ReusableThreadingHTTPServer(ThreadingHTTPServer):
 def py_line(msg: str) -> None:
     now = datetime.now()
     ts = now.strftime("%H:%M:%S.%f")[:-3]
-    print(f"{ts} {msg}", flush=True)
+    line = f"{ts} {msg}"
+    print(line, flush=True)
+    if _LOG_PROVIDER is not None:
+        logging.getLogger("demo.pipeline").info(line)
 
 
 def _build_resource() -> Resource:
@@ -100,6 +110,13 @@ def _otlp_metrics_ep() -> str:
     return _otlp_traces_ep().replace("/v1/traces", "/v1/metrics", 1)
 
 
+def _otlp_logs_ep() -> str:
+    o = os.environ.get("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", "").strip()
+    if o:
+        return o
+    return _otlp_traces_ep().replace("/v1/traces", "/v1/logs", 1)
+
+
 def _use_otlp_http() -> bool:
     m = os.environ.get("OTEL_DEMO_TRACE_EXPORT", "")
     if not m:
@@ -109,6 +126,13 @@ def _use_otlp_http() -> bool:
     if m in ("otlp", "http"):
         return True
     return False
+
+
+def _use_otlp_log_export() -> bool:
+    if not _use_otlp_http():
+        return False
+    v = os.environ.get("OTEL_DEMO_LOG_EXPORT", "otlp").strip().lower()
+    return v not in ("0", "false", "no", "off")
 
 
 def _process_metrics_enabled() -> bool:
@@ -199,7 +223,8 @@ def _register_process_metrics(meter: metrics.Meter) -> None:
 
 
 def _init_telemetry() -> TracerProvider:
-    global _TRACER, _METER
+    global _TRACER, _METER, _LOG_PROVIDER
+    _LOG_PROVIDER = None
     # Jawny W3C tracecontext — spójnie z workerami (Rust); bez tego zależność od domyślnego OTEL_PROPAGATORS.
     set_global_textmap(TraceContextTextMapPropagator())
     resource = _build_resource()
@@ -212,6 +237,17 @@ def _init_telemetry() -> TracerProvider:
         reader = PeriodicExportingMetricReader(mexp, export_interval_millis=5000)
         mp = MeterProvider(resource=resource, metric_readers=[reader])
         metrics.set_meter_provider(mp)
+        if _use_otlp_log_export():
+            lexp = OTLPLogExporter(endpoint=_otlp_logs_ep(), timeout=5)
+            lp = LoggerProvider(resource=resource)
+            lp.add_log_record_processor(BatchLogRecordProcessor(lexp))
+            set_logger_provider(lp)
+            _LOG_PROVIDER = lp
+            dem = logging.getLogger("demo.pipeline")
+            dem.setLevel(logging.INFO)
+            dem.handlers.clear()
+            dem.addHandler(LoggingHandler(level=logging.NOTSET, logger_provider=lp))
+            dem.propagate = False
     else:
         from opentelemetry.sdk.trace.export import ConsoleSpanExporter
 
@@ -294,6 +330,19 @@ def _span_name_for_activity(activity: str, index: int) -> str:
     return a[:256]
 
 
+def _segment_schema_error_or_none(seg: dict[str, Any], where: str) -> str | None:
+    if "processing_time" in seg:
+        return (
+            f"{where}: field 'processing_time' is not supported; use non-empty "
+            "'processing_steps' with {{\"activity\",\"time\"}} "
+            "(one element for a single CPU block)"
+        )
+    raw = seg.get("processing_steps")
+    if not isinstance(raw, list) or len(raw) == 0:
+        return f"{where}: non-empty 'processing_steps' is required"
+    return None
+
+
 @dataclass(frozen=True)
 class _ProcStepCpu:
     activity: str
@@ -323,6 +372,11 @@ def _validate_nested_route_segments(raw: list[Any], step_i: int) -> tuple[dict[s
             raise ValueError(
                 f"processing_steps[{step_i}].nested_route[{j}].id must be a non-empty string"
             )
+        sch = _segment_schema_error_or_none(
+            seg, f"processing_steps[{step_i}].nested_route[{j}]"
+        )
+        if sch:
+            raise ValueError(sch)
         out.append(seg)
     first = (out[0].get("id") or "").strip().lower()
     if first == "py":
@@ -499,15 +553,17 @@ def _make_handler(
                     f"(expected {client_id!r}, got {seg_id!r})",
                 )
                 return
+            sch = _segment_schema_error_or_none(seg, "route segment")
+            if sch:
+                self.send_error(400, sch)
+                return
             try:
                 steps = _parse_processing_steps(seg)
             except ValueError as e:
                 self.send_error(400, str(e))
                 return
-            try:
-                dur_legacy = _parse_processing_time(seg.get("processing_time"))
-            except ValueError as e:
-                self.send_error(400, str(e))
+            if steps is None:
+                self.send_error(400, "route segment: non-empty 'processing_steps' is required")
                 return
 
             with tr.start_as_current_span(
@@ -517,119 +573,101 @@ def _make_handler(
                     "demo.client_id": client_id,
                 },
             ) as span:
-                if steps is not None:
-                    cpu_sum = 0.0
-                    has_nested = False
+                cpu_sum = 0.0
+                has_nested = False
+                for st in steps:
+                    if isinstance(st, _ProcStepNested):
+                        has_nested = True
+                        cpu_sum += st.pre_sec
+                    else:
+                        cpu_sum += st.sec
+                span.set_attribute("demo.simulated_processing_sec", cpu_sum)
+                span.set_attribute("demo.processing.mode", "steps")
+                span.set_attribute("demo.step_count", len(steps))
+                span.set_attribute("demo.has_nested_steps", has_nested)
+                with tr.start_as_current_span(
+                    "pipeline.processing",
+                    attributes={
+                        "demo.processing.mode": "steps",
+                        "demo.step_count": len(steps),
+                        "demo.simulated_processing_sec": cpu_sum,
+                        "demo.has_nested_steps": has_nested,
+                    },
+                ):
                     for st in steps:
-                        if isinstance(st, _ProcStepNested):
-                            has_nested = True
-                            cpu_sum += st.pre_sec
+                        if isinstance(st, _ProcStepCpu):
+                            name = _span_name_for_activity(st.activity, st.index)
+                            with tr.start_as_current_span(
+                                name,
+                                attributes={
+                                    "demo.activity": st.activity,
+                                    "demo.cpu_spin_sec": st.sec,
+                                    "demo.step_index": st.index,
+                                },
+                            ):
+                                if st.sec > 0:
+                                    _cpu_spin_seconds(st.sec)
                         else:
-                            cpu_sum += st.sec
-                    span.set_attribute("demo.simulated_processing_sec", cpu_sum)
-                    span.set_attribute("demo.processing.mode", "steps")
-                    span.set_attribute("demo.step_count", len(steps))
-                    span.set_attribute("demo.has_nested_steps", has_nested)
-                    with tr.start_as_current_span(
-                        "pipeline.processing",
-                        attributes={
-                            "demo.processing.mode": "steps",
-                            "demo.step_count": len(steps),
-                            "demo.simulated_processing_sec": cpu_sum,
-                            "demo.has_nested_steps": has_nested,
-                        },
-                    ):
-                        for st in steps:
-                            if isinstance(st, _ProcStepCpu):
-                                name = _span_name_for_activity(st.activity, st.index)
+                            name = _span_name_for_activity(st.activity, st.index)
+                            with tr.start_as_current_span(
+                                name,
+                                attributes={
+                                    "demo.activity": st.activity,
+                                    "demo.cpu_spin_sec": st.pre_sec,
+                                    "demo.step_index": st.index,
+                                    "demo.nested_subpipeline": True,
+                                },
+                            ):
+                                if st.pre_sec > 0:
+                                    _cpu_spin_seconds(st.pre_sec)
+                                first_id = (
+                                    st.nested_route[0].get("id") or ""
+                                ).strip()
+                                if not first_id:
+                                    self.send_error(
+                                        400,
+                                        f"processing_steps[{st.index}].nested_route[0].id empty",
+                                    )
+                                    return
+                                nurl = _peer_url(peers, first_id)
+                                if not nurl:
+                                    self.send_error(
+                                        502,
+                                        f"no peer URL for nested id {first_id!r}",
+                                    )
+                                    return
+                                nest_payload = _nested_pipeline_payload(st.nested_route)
+                                nest_bytes = json.dumps(
+                                    nest_payload, ensure_ascii=False
+                                ).encode("utf-8")
+                                py_line(
+                                    f"[{client_id}] nested_forward to {nurl}: "
+                                    f"{json.dumps(nest_payload, ensure_ascii=False)}"
+                                )
                                 with tr.start_as_current_span(
-                                    name,
-                                    attributes={
-                                        "demo.activity": st.activity,
-                                        "demo.cpu_spin_sec": st.sec,
-                                        "demo.step_index": st.index,
-                                    },
-                                ):
-                                    if st.sec > 0:
-                                        _cpu_spin_seconds(st.sec)
-                            else:
-                                name = _span_name_for_activity(st.activity, st.index)
-                                with tr.start_as_current_span(
-                                    name,
-                                    attributes={
-                                        "demo.activity": st.activity,
-                                        "demo.cpu_spin_sec": st.pre_sec,
-                                        "demo.step_index": st.index,
-                                        "demo.nested_subpipeline": True,
-                                    },
-                                ):
-                                    if st.pre_sec > 0:
-                                        _cpu_spin_seconds(st.pre_sec)
-                                    first_id = (
-                                        st.nested_route[0].get("id") or ""
-                                    ).strip()
-                                    if not first_id:
+                                    "pipeline.nested_forward",
+                                    kind=trace.SpanKind.CLIENT,
+                                    attributes={"http.url": nurl.strip()},
+                                ) as nfw:
+                                    try:
+                                        ncode, _nbody = _forward_to_next(
+                                            nurl.strip(), nest_bytes
+                                        )
+                                    except (urlerror.URLError, OSError) as e:
+                                        nfw.record_exception(e)
                                         self.send_error(
-                                            400,
-                                            f"processing_steps[{st.index}].nested_route[0].id empty",
+                                            502, f"nested_forward failed: {e}"
                                         )
                                         return
-                                    nurl = _peer_url(peers, first_id)
-                                    if not nurl:
+                                    nfw.set_attribute(
+                                        "demo.downstream_status", ncode
+                                    )
+                                    if ncode < 200 or ncode >= 300:
                                         self.send_error(
                                             502,
-                                            f"no peer URL for nested id {first_id!r}",
+                                            f"nested_forward HTTP {ncode}",
                                         )
                                         return
-                                    nest_payload = _nested_pipeline_payload(st.nested_route)
-                                    nest_bytes = json.dumps(
-                                        nest_payload, ensure_ascii=False
-                                    ).encode("utf-8")
-                                    py_line(
-                                        f"[{client_id}] nested_forward to {nurl}: "
-                                        f"{json.dumps(nest_payload, ensure_ascii=False)}"
-                                    )
-                                    with tr.start_as_current_span(
-                                        "pipeline.nested_forward",
-                                        kind=trace.SpanKind.CLIENT,
-                                        attributes={"http.url": nurl.strip()},
-                                    ) as nfw:
-                                        try:
-                                            ncode, _nbody = _forward_to_next(
-                                                nurl.strip(), nest_bytes
-                                            )
-                                        except (urlerror.URLError, OSError) as e:
-                                            nfw.record_exception(e)
-                                            self.send_error(
-                                                502, f"nested_forward failed: {e}"
-                                            )
-                                            return
-                                        nfw.set_attribute(
-                                            "demo.downstream_status", ncode
-                                        )
-                                        if ncode < 200 or ncode >= 300:
-                                            self.send_error(
-                                                502,
-                                                f"nested_forward HTTP {ncode}",
-                                            )
-                                            return
-                elif dur_legacy > 0:
-                    span.set_attribute("demo.simulated_processing_sec", dur_legacy)
-                    span.set_attribute("demo.processing.mode", "single")
-                    with tr.start_as_current_span(
-                        "pipeline.processing",
-                        attributes={
-                            "demo.processing.mode": "single",
-                            "demo.simulated_processing_sec": dur_legacy,
-                        },
-                    ):
-                        with tr.start_as_current_span(
-                            "pipeline.simulated_work",
-                            attributes={"demo.cpu_spin_sec": dur_legacy},
-                        ):
-                            _cpu_spin_seconds(dur_legacy)
-                else:
-                    span.set_attribute("demo.processing.mode", "none")
 
                 seg["visited"] = True
                 vl = data.setdefault("visit_log", [])

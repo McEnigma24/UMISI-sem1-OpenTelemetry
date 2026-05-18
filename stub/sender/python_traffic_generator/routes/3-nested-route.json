@@ -3,7 +3,9 @@
     {
       "id": "py",
       "visited": false,
-      "processing_time": "0.02s"
+      "processing_steps": [
+        { "activity": "hop-work", "time": "0.02s" }
+      ]
     },
     {
       "id": "rs",
@@ -13,8 +15,20 @@
         {
           "activity": "nested-worker-chain",
           "nested_route": [
-            { "id": "rs", "visited": false, "processing_time": "0.02s" },
-            { "id": "cs", "visited": false, "processing_time": "0.02s" }
+            {
+              "id": "rs",
+              "visited": false,
+              "processing_steps": [
+                { "activity": "hop-work", "time": "0.02s" }
+              ]
+            },
+            {
+              "id": "cs",
+              "visited": false,
+              "processing_steps": [
+                { "activity": "hop-work", "time": "0.02s" }
+              ]
+            }
           ]
         },
         { "activity": "after-nested", "time": "0.02s" }
@@ -23,7 +37,9 @@
     {
       "id": "cs",
       "visited": false,
-      "processing_time": "0.02s"
+      "processing_steps": [
+        { "activity": "hop-work", "time": "0.02s" }
+      ]
     }
   ],
   "visit_log": [],

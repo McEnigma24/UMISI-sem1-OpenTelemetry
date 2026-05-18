@@ -55,8 +55,16 @@ def _default_payload() -> dict[str, Any]:
                 {"activity": "preparing-file", "time": "0.05s"},
                 {"activity": "quering DB", "time": "0.05s"},
             ]},
-            {"id": "rs", "visited": False, "processing_time": "0.05s"},
-            {"id": "cs", "visited": False, "processing_time": "0.05s"},
+            {
+                "id": "rs",
+                "visited": False,
+                "processing_steps": [{"activity": "hop-work", "time": "0.05s"}],
+            },
+            {
+                "id": "cs",
+                "visited": False,
+                "processing_steps": [{"activity": "hop-work", "time": "0.05s"}],
+            },
         ],
         "visit_log": [],
         "counter": "0",

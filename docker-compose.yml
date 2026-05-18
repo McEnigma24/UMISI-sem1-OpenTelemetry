@@ -141,8 +141,10 @@ services:
     image: client_rust
     environment:
       OTEL_DEMO_TRACE_EXPORT: otlp
+      OTEL_DEMO_LOG_EXPORT: otlp
       OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://otel:4318/v1/traces
       OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: http://otel:4318/v1/metrics
+      OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: http://otel:4318/v1/logs
       OTEL_ENVIRONMENT: local
       OTEL_DEMO_RESOURCE_TAG: lang-rust
       DEMO_HTTP_ADDR: 0.0.0.0:8080
@@ -169,8 +171,10 @@ services:
     environment:
       ASPNETCORE_URLS: http://0.0.0.0:8080
       OTEL_DEMO_TRACE_EXPORT: otlp
+      OTEL_DEMO_LOG_EXPORT: otlp
       OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://otel:4318/v1/traces
       OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: http://otel:4318/v1/metrics
+      OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: http://otel:4318/v1/logs
       OTEL_ENVIRONMENT: local
       OTEL_DEMO_RESOURCE_TAG: lang-csharp
       OTEL_SERVICE_NAME: worker_csharp
@@ -197,8 +201,10 @@ services:
       - "18080:8080"
     environment:
       OTEL_DEMO_TRACE_EXPORT: otlp
+      OTEL_DEMO_LOG_EXPORT: otlp
       OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://otel:4318/v1/traces
       OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: http://otel:4318/v1/metrics
+      OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: http://otel:4318/v1/logs
       OTEL_ENVIRONMENT: local
       OTEL_DEMO_RESOURCE_TAG: lang-python
       DEMO_HTTP_ADDR: 0.0.0.0:8080

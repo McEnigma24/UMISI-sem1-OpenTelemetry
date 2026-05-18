@@ -9,6 +9,7 @@
 
 docker compose up -d || exit 1
 docker compose logs -f gateway-python client-rust client-csharp
+# docker compose logs -f otel # 'forward' - 'received' - 'Body:'
 
 docker container prune -f
 docker compose down
