@@ -1,6 +1,10 @@
 #!/bin/bash
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
+
+export PYTHON_WORKER_MODE="${PYTHON_WORKER_MODE:-complete}"
+echo "compose_run: worker-python mode: PYTHON_WORKER_MODE=${PYTHON_WORKER_MODE} (complete | incomplete)"
+
 ./compose_build.sh || exit 1
 
 # docker compose up
