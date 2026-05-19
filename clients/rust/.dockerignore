@@ -1,3 +1,0 @@
-# Nie wykluczaj docker-target/ — runner robi COPY ./docker-target/release/client_rust (jak cpp ./build/).
-target/
-.cargo_home/

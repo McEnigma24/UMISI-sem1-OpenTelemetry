@@ -1,0 +1,26 @@
+[package]
+name = "rust-worker"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+axum = { version = "0.7", default-features = false, features = ["http1", "json", "tokio"] }
+http = "1"
+opentelemetry = { version = "0.31", features = ["trace", "metrics", "logs"] }
+opentelemetry-http = { version = "0.31", features = ["reqwest"] }
+opentelemetry-otlp = { version = "0.31", features = ["trace", "metrics", "http-proto", "reqwest", "logs"] }
+opentelemetry-stdout = { version = "0.31", features = ["trace"] }
+opentelemetry_sdk = { version = "0.31", features = ["trace", "metrics", "logs", "rt-tokio", "rt-tokio-current-thread"] }
+opentelemetry-semantic-conventions = "0.29"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "http2"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = [] }
+pyroscope = { version = "2.0.1", features = ["backend-pprof-rs"] }
+sysinfo = "0.31"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
+uuid = { version = "1", features = ["v4"] }
+
+[[bin]]
+name = "worker_rust"
+path = "_src/main.rs"

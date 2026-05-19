@@ -68,7 +68,7 @@ def _default_payload() -> dict[str, Any]:
         ],
         "visit_log": [],
         "counter": "0",
-        "table_of_clients": [],
+        "table_of_workers": [],
     }
 
 

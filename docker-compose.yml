@@ -1,6 +1,6 @@
 #   docker compose logs -f otel          # trace’y z `debug` + eksport do Jaegera + Tempo (Grafana Drilldown)
 #   docker compose up --scale gateway-python=2
-#   docker compose up otel               # sam Collector, klient ręcznie z hosta
+#   docker compose up otel               # sam Collector, ręczne wywołania z hosta
 #
 # Obrazy: oficjalne (grafana/grafana, prom/prometheus, jaegertracing/all-in-one) — dobre wsparcie
 # w dokumentacji. Docker Hardened Images (dhi/...) pod FIPS/CIS, na lokalne demo zwykle niepotrzebne.
@@ -15,9 +15,9 @@
 #
 # HTTP pipeline: niepusty JSON ``route`` + DEMO_PEER_* (mapa hopów). Z hosta gateway: http://127.0.0.1:18080
 # (POST /v1/pipeline; ``localhost`` bywa IPv6 — lepiej 127.0.0.1). Diagnoza: ``docker compose ps``, logi
-# ``gateway-python`` / ``client-csharp`` / ``client-rust`` / ``client-go`` / ``client-java``; pierwsze sekundy po starcie workery mogą jeszcze nie forwardować.
-# ``client-java`` ma healthcheck; workery z ``DEMO_PEER_JA`` czekają na ``service_healthy`` — inaczej Go/Rust/C#/gateway
-#   mogą dostać ``lookup client-java … i/o timeout`` (DNS 127.0.0.11) przy pierwszym hopie do workera Java (``DEMO_CLIENT_ID=ja``).
+# ``gateway-python`` / ``worker-csharp`` / ``worker-rust`` / ``worker-go`` / ``worker-java``; pierwsze sekundy po starcie workery mogą jeszcze nie forwardować.
+# ``worker-java`` ma healthcheck; workery z ``DEMO_PEER_JA`` czekają na ``service_healthy`` — inaczej Go/Rust/C#/gateway
+#   mogą dostać ``lookup worker-java … i/o timeout`` (DNS 127.0.0.11) przy pierwszym hopie do workera Java (``DEMO_WORKER_ID=ja``).
 # Nie ustawiaj ``dns_opt: use-vc`` na tych serwisach: embedded DNS Dockera potrafi wtedy zwracać ``invalid DNS response``.
 # Pyroscope push (log startowy ten sam): Python ``pyroscope-io``, Rust ``pyroscope``, Go ``pyroscope-go``, Node ``@pyroscope/nodejs``.
 # C# — bez wbudowanego push CPU (profiler natywny wymaga osobnego obrazu / zmiennych CORECLR_*); tylko spójny komunikat + ``PYROSCOPE_SERVER``.
@@ -82,7 +82,7 @@ services:
         condition: service_started
 
   # Profiling (Grafana Pyroscope). Drilldown „Profiles / Diff flame graph” = dwa zakresy czasu profilu CPU
-  #   (continuous profiling), nie porównanie dwóch trace_id. ``gateway-python``, ``client-rust``, ``client-go``, ``client-java``, ``client-nodejs`` (profil ``nodejs``) wysyłają push
+  #   (continuous profiling), nie porównanie dwóch trace_id. ``gateway-python``, ``worker-rust``, ``worker-go``, ``worker-java``, ``worker-nodejs`` (profil ``nodejs``) wysyłają push
   #   profili (PYROSCOPE_SERVER); C# — brak push profilu CPU w tym obrazie (profiler .NET osobno). Trace→span profil: ``pyroscope.profile.id`` osobno.
   # Dok.: https://grafana.com/docs/pyroscope/latest/configure-client/
   pyroscope:
@@ -114,12 +114,12 @@ services:
       - pyroscope
 
   # workers #
-  # client-cpp:
+  # worker-cpp:
   #   build:
-  #     context: ./clients/cpp
-  #   image: client_cpp
+  #     context: ./workers/cpp
+  #   image: worker_cpp
   #   volumes:
-  #     - ./clients/cpp/build-docker:/app/build
+  #     - ./workers/cpp/build-docker:/app/build
   #   environment:
   #     OTEL_DEMO_TRACE_EXPORT: otlp
   #     OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://otel:4318/v1/traces
@@ -128,22 +128,22 @@ services:
   #     OTEL_DEMO_RESOURCE_TAG: lang-cpp
   #     DEMO_HTTP_ADDR: 0.0.0.0:8080
   #     DEMO_HTTP_PATH: /v1/pipeline
-  #     DEMO_CLIENT_ID: cpp
+  #     DEMO_WORKER_ID: cpp
   #     DEMO_PEER_PY: http://gateway-python:8080/v1/pipeline
-  #     DEMO_PEER_RS: http://client-rust:8080/v1/pipeline
-  #     DEMO_PEER_CS: http://client-csharp:8080/v1/pipeline
+  #     DEMO_PEER_RS: http://worker-rust:8080/v1/pipeline
+  #     DEMO_PEER_CS: http://worker-csharp:8080/v1/pipeline
   #   depends_on:
   #     otel:
   #       condition: service_started
 
   # Rust / C# / Go: najpierw `./compose_build.sh` (volume → docker-target / publish-docker), potem runner w compose.
-  # Java: `docker compose build client-java` z `clients/java` (Maven shade w Dockerfile). Node.js: profil ``nodejs`` — ``docker compose --profile nodejs build client-nodejs``.
-  client-rust:
+  # Java: `docker compose build worker-java` z `workers/java` (Maven shade w Dockerfile). Node.js: profil ``nodejs`` — ``docker compose --profile nodejs build worker-nodejs``.
+  worker-rust:
     build:
-      context: ./clients/rust
+      context: ./workers/rust
       dockerfile: Dockerfile
       target: runner
-    image: client_rust
+    image: worker_rust
     environment:
       OTEL_DEMO_TRACE_EXPORT: otlp
       OTEL_DEMO_LOG_EXPORT: otlp
@@ -154,12 +154,12 @@ services:
       OTEL_DEMO_RESOURCE_TAG: lang-rust
       DEMO_HTTP_ADDR: 0.0.0.0:8080
       DEMO_HTTP_PATH: /v1/pipeline
-      DEMO_CLIENT_ID: rs
+      DEMO_WORKER_ID: rs
       DEMO_PEER_PY: http://gateway-python:8080/v1/pipeline
-      DEMO_PEER_RS: http://client-rust:8080/v1/pipeline
-      DEMO_PEER_CS: http://client-csharp:8080/v1/pipeline
-      DEMO_PEER_GO: http://client-go:8080/v1/pipeline
-      DEMO_PEER_JA: http://client-java:8080/v1/pipeline
+      DEMO_PEER_RS: http://worker-rust:8080/v1/pipeline
+      DEMO_PEER_CS: http://worker-csharp:8080/v1/pipeline
+      DEMO_PEER_GO: http://worker-go:8080/v1/pipeline
+      DEMO_PEER_JA: http://worker-java:8080/v1/pipeline
       OTEL_SERVICE_NAME: worker_rust
       OTEL_METRIC_EXPORT_INTERVAL: "5000"
       PYROSCOPE_SERVER: http://pyroscope:4040
@@ -168,16 +168,16 @@ services:
         condition: service_started
       pyroscope:
         condition: service_started
-      client-java:
+      worker-java:
         condition: service_healthy
 
   # C#: jak Rust / Go — najpierw `./compose_build.sh` (builder + volumen → publish-docker na hoście).
-  client-csharp:
+  worker-csharp:
     build:
-      context: ./clients/csharp
+      context: ./workers/csharp
       dockerfile: Dockerfile
       target: runner
-    image: client_csharp
+    image: worker_csharp
     environment:
       ASPNETCORE_URLS: http://0.0.0.0:8080
       OTEL_DEMO_TRACE_EXPORT: otlp
@@ -191,27 +191,27 @@ services:
       OTEL_METRIC_EXPORT_INTERVAL: "5000"
       DEMO_HTTP_ADDR: 0.0.0.0:8080
       DEMO_HTTP_PATH: /v1/pipeline
-      DEMO_CLIENT_ID: cs
+      DEMO_WORKER_ID: cs
       DEMO_PEER_PY: http://gateway-python:8080/v1/pipeline
-      DEMO_PEER_RS: http://client-rust:8080/v1/pipeline
-      DEMO_PEER_CS: http://client-csharp:8080/v1/pipeline
-      DEMO_PEER_GO: http://client-go:8080/v1/pipeline
-      DEMO_PEER_JA: http://client-java:8080/v1/pipeline
+      DEMO_PEER_RS: http://worker-rust:8080/v1/pipeline
+      DEMO_PEER_CS: http://worker-csharp:8080/v1/pipeline
+      DEMO_PEER_GO: http://worker-go:8080/v1/pipeline
+      DEMO_PEER_JA: http://worker-java:8080/v1/pipeline
       PYROSCOPE_SERVER: http://pyroscope:4040
     depends_on:
       otel:
         condition: service_started
       pyroscope:
         condition: service_started
-      client-java:
+      worker-java:
         condition: service_healthy
 
-  client-go:
+  worker-go:
     build:
-      context: ./clients/go
+      context: ./workers/go
       dockerfile: Dockerfile
       target: runner
-    image: client_go
+    image: worker_go
     environment:
       OTEL_DEMO_TRACE_EXPORT: otlp
       OTEL_DEMO_LOG_EXPORT: otlp
@@ -224,26 +224,26 @@ services:
       OTEL_METRIC_EXPORT_INTERVAL: "5000"
       DEMO_HTTP_ADDR: 0.0.0.0:8080
       DEMO_HTTP_PATH: /v1/pipeline
-      DEMO_CLIENT_ID: go
+      DEMO_WORKER_ID: go
       DEMO_PEER_PY: http://gateway-python:8080/v1/pipeline
-      DEMO_PEER_RS: http://client-rust:8080/v1/pipeline
-      DEMO_PEER_CS: http://client-csharp:8080/v1/pipeline
-      DEMO_PEER_GO: http://client-go:8080/v1/pipeline
-      DEMO_PEER_JA: http://client-java:8080/v1/pipeline
+      DEMO_PEER_RS: http://worker-rust:8080/v1/pipeline
+      DEMO_PEER_CS: http://worker-csharp:8080/v1/pipeline
+      DEMO_PEER_GO: http://worker-go:8080/v1/pipeline
+      DEMO_PEER_JA: http://worker-java:8080/v1/pipeline
       PYROSCOPE_SERVER: http://pyroscope:4040
     depends_on:
       otel:
         condition: service_started
       pyroscope:
         condition: service_started
-      client-java:
+      worker-java:
         condition: service_healthy
 
-  client-java:
+  worker-java:
     build:
-      context: ./clients/java
+      context: ./workers/java
       dockerfile: Dockerfile
-    image: client_java
+    image: worker_java
     environment:
       OTEL_DEMO_TRACE_EXPORT: otlp
       OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://otel:4318/v1/traces
@@ -255,12 +255,12 @@ services:
       PYROSCOPE_SERVER: http://pyroscope:4040
       DEMO_HTTP_ADDR: 0.0.0.0:8080
       DEMO_HTTP_PATH: /v1/pipeline
-      DEMO_CLIENT_ID: ja
+      DEMO_WORKER_ID: ja
       DEMO_PEER_PY: http://gateway-python:8080/v1/pipeline
-      DEMO_PEER_RS: http://client-rust:8080/v1/pipeline
-      DEMO_PEER_CS: http://client-csharp:8080/v1/pipeline
-      DEMO_PEER_GO: http://client-go:8080/v1/pipeline
-      DEMO_PEER_JA: http://client-java:8080/v1/pipeline
+      DEMO_PEER_RS: http://worker-rust:8080/v1/pipeline
+      DEMO_PEER_CS: http://worker-csharp:8080/v1/pipeline
+      DEMO_PEER_GO: http://worker-go:8080/v1/pipeline
+      DEMO_PEER_JA: http://worker-java:8080/v1/pipeline
     healthcheck:
       test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8080 && exec 3<&-"]
       interval: 3s
@@ -273,14 +273,14 @@ services:
       pyroscope:
         condition: service_started
 
-  # client-nodejs:
+  # worker-nodejs:
   #   profiles:
   #     - nodejs
   #   build:
-  #     context: ./clients/nodejs
+  #     context: ./workers/nodejs
   #     dockerfile: Dockerfile
   #     target: runner
-  #   image: client_nodejs
+  #   image: worker_nodejs
   #   environment:
   #     OTEL_DEMO_TRACE_EXPORT: otlp
   #     OTEL_DEMO_LOG_EXPORT: otlp
@@ -299,12 +299,12 @@ services:
   #     # DEMO_OTEL_DIAG: "true"  # stderr: Diag DEBUG (eksport OTLP, propagacja); gdy dalej brak worker_nodejs w Jaegerze
   #     DEMO_HTTP_ADDR: 0.0.0.0:8080
   #     DEMO_HTTP_PATH: /v1/pipeline
-  #     DEMO_CLIENT_ID: js
+  #     DEMO_WORKER_ID: js
   #     DEMO_PEER_PY: http://gateway-python:8080/v1/pipeline
-  #     DEMO_PEER_RS: http://client-rust:8080/v1/pipeline
-  #     DEMO_PEER_CS: http://client-csharp:8080/v1/pipeline
-  #     DEMO_PEER_GO: http://client-go:8080/v1/pipeline
-  #     DEMO_PEER_JS: http://client-nodejs:8080/v1/pipeline
+  #     DEMO_PEER_RS: http://worker-rust:8080/v1/pipeline
+  #     DEMO_PEER_CS: http://worker-csharp:8080/v1/pipeline
+  #     DEMO_PEER_GO: http://worker-go:8080/v1/pipeline
+  #     DEMO_PEER_JS: http://worker-nodejs:8080/v1/pipeline
   #     PYROSCOPE_SERVER: http://pyroscope:4040
   #   healthcheck:
   #     test:
@@ -327,8 +327,8 @@ services:
   # API gateway #
   gateway-python:
     build:
-      context: ./clients/python
-    image: client_python
+      context: ./workers/python
+    image: worker_python
     ports:
       # Mapowanie na hosta (domyślnie nasłuch na 0.0.0.0 — dostęp z LAN: http://<IP_hosta>:18080)
       - "18080:8080"
@@ -342,12 +342,12 @@ services:
       OTEL_DEMO_RESOURCE_TAG: lang-python
       DEMO_HTTP_ADDR: 0.0.0.0:8080
       DEMO_HTTP_PATH: /v1/pipeline
-      DEMO_CLIENT_ID: py
+      DEMO_WORKER_ID: py
       DEMO_PEER_PY: http://gateway-python:8080/v1/pipeline
-      DEMO_PEER_RS: http://client-rust:8080/v1/pipeline
-      DEMO_PEER_CS: http://client-csharp:8080/v1/pipeline
-      DEMO_PEER_GO: http://client-go:8080/v1/pipeline
-      DEMO_PEER_JA: http://client-java:8080/v1/pipeline
+      DEMO_PEER_RS: http://worker-rust:8080/v1/pipeline
+      DEMO_PEER_CS: http://worker-csharp:8080/v1/pipeline
+      DEMO_PEER_GO: http://worker-go:8080/v1/pipeline
+      DEMO_PEER_JA: http://worker-java:8080/v1/pipeline
       OTEL_SERVICE_NAME: gateway_python
       OTEL_METRIC_EXPORT_INTERVAL: "5000"
       PYROSCOPE_SERVER: http://pyroscope:4040
@@ -356,7 +356,7 @@ services:
         condition: service_started
       pyroscope:
         condition: service_started
-      client-java:
+      worker-java:
         condition: service_healthy
     healthcheck:
       test:
@@ -392,12 +392,12 @@ services:
 
 
 
-  # client-cpp:
+  # worker-cpp:
   #   build:
-  #     context: ./clients/cpp
-  #   image: client_cpp
+  #     context: ./workers/cpp
+  #   image: worker_cpp
   #   volumes:
-  #     - ./clients/cpp/build-docker:/app/build
+  #     - ./workers/cpp/build-docker:/app/build
   #   environment:
   #     OTEL_DEMO_TRACE_EXPORT: otlp
   #     OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://otel:4318/v1/traces

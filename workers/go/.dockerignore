@@ -1,0 +1,1 @@
+# Nie wykluczaj docker-target/ — runner robi COPY ./docker-target/worker_go
