@@ -276,7 +276,7 @@ func loadPeerMap() (map[string]string, error) {
 	return out, nil
 }
 
-// materializePeerHosts zamienia nazwy serwisów Dockera (np. client-nodejs) na adres IP z jednorazowego
+// materializePeerHosts zamienia nazwy serwisów Dockera (np. client-java) na adres IP z jednorazowego
 // LookupHost przy starcie — unika powtarzalnego DNS 127.0.0.11 na każdym forwardzie (WSL/UDP timeout).
 // Po zmianie IP peera (redeploy) zrestartuj tego workera.
 func materializePeerHosts(peers map[string]string) map[string]string {

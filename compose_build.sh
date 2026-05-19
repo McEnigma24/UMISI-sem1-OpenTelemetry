@@ -15,8 +15,13 @@ echo "compose_build: Go (Dockerfile builder + volumen /workspace)…"
 ( cd clients/go && ./docker_build.sh )
 
 clear
-echo "compose_build: Node.js (Dockerfile: npm install + index.mjs)…"
-( cd clients/nodejs && ./docker_build.sh )
+echo "compose_build: Java (Dockerfile: Maven shade)…"
+( cd clients/java && ./docker_build.sh )
+
+clear
+# Node.js (opcjonalnie): ``docker compose --profile nodejs build client-nodejs`` — nie w domyślnym stacku.
+# echo "compose_build: Node.js …"
+# ( cd clients/nodejs && ./docker_build.sh )
 
 clear
 docker compose build --parallel

@@ -15,9 +15,9 @@
 #
 # HTTP pipeline: niepusty JSON ``route`` + DEMO_PEER_* (mapa hopów). Z hosta gateway: http://127.0.0.1:18080
 # (POST /v1/pipeline; ``localhost`` bywa IPv6 — lepiej 127.0.0.1). Diagnoza: ``docker compose ps``, logi
-# ``gateway-python`` / ``client-csharp`` / ``client-rust`` / ``client-go`` / ``client-nodejs``; pierwsze sekundy po starcie workery mogą jeszcze nie forwardować.
-# ``client-nodejs`` ma healthcheck; workery z ``DEMO_PEER_JS`` czekają na ``service_healthy`` — inaczej Go/Rust/C#/gateway
-#   mogą dostać ``lookup client-nodejs … i/o timeout`` (DNS 127.0.0.11) przy pierwszym hopie do JS.
+# ``gateway-python`` / ``client-csharp`` / ``client-rust`` / ``client-go`` / ``client-java``; pierwsze sekundy po starcie workery mogą jeszcze nie forwardować.
+# ``client-java`` ma healthcheck; workery z ``DEMO_PEER_JA`` czekają na ``service_healthy`` — inaczej Go/Rust/C#/gateway
+#   mogą dostać ``lookup client-java … i/o timeout`` (DNS 127.0.0.11) przy pierwszym hopie do workera Java (``DEMO_CLIENT_ID=ja``).
 # Nie ustawiaj ``dns_opt: use-vc`` na tych serwisach: embedded DNS Dockera potrafi wtedy zwracać ``invalid DNS response``.
 # Pyroscope push (log startowy ten sam): Python ``pyroscope-io``, Rust ``pyroscope``, Go ``pyroscope-go``, Node ``@pyroscope/nodejs``.
 # C# — bez wbudowanego push CPU (profiler natywny wymaga osobnego obrazu / zmiennych CORECLR_*); tylko spójny komunikat + ``PYROSCOPE_SERVER``.
@@ -82,7 +82,7 @@ services:
         condition: service_started
 
   # Profiling (Grafana Pyroscope). Drilldown „Profiles / Diff flame graph” = dwa zakresy czasu profilu CPU
-  #   (continuous profiling), nie porównanie dwóch trace_id. ``gateway-python``, ``client-rust``, ``client-go``, ``client-nodejs`` wysyłają push
+  #   (continuous profiling), nie porównanie dwóch trace_id. ``gateway-python``, ``client-rust``, ``client-go``, ``client-nodejs`` (profil ``nodejs``) wysyłają push
   #   profili (PYROSCOPE_SERVER); C# — brak push profilu CPU w tym obrazie (profiler .NET osobno). Trace→span profil: ``pyroscope.profile.id`` osobno.
   # Dok.: https://grafana.com/docs/pyroscope/latest/configure-client/
   pyroscope:
@@ -137,7 +137,7 @@ services:
   #       condition: service_started
 
   # Rust / C# / Go: najpierw `./compose_build.sh` (volume → docker-target / publish-docker), potem runner w compose.
-  # Node.js: `docker compose build client-nodejs` buduje z `clients/nodejs` (npm ci + index.mjs) — nie zależy od publish-docker/.
+  # Java: `docker compose build client-java` z `clients/java` (Maven shade w Dockerfile). Node.js: profil ``nodejs`` — ``docker compose --profile nodejs build client-nodejs``.
   client-rust:
     build:
       context: ./clients/rust
@@ -159,7 +159,7 @@ services:
       DEMO_PEER_RS: http://client-rust:8080/v1/pipeline
       DEMO_PEER_CS: http://client-csharp:8080/v1/pipeline
       DEMO_PEER_GO: http://client-go:8080/v1/pipeline
-      DEMO_PEER_JS: http://client-nodejs:8080/v1/pipeline
+      DEMO_PEER_JA: http://client-java:8080/v1/pipeline
       OTEL_SERVICE_NAME: worker_rust
       OTEL_METRIC_EXPORT_INTERVAL: "5000"
       PYROSCOPE_SERVER: http://pyroscope:4040
@@ -168,7 +168,7 @@ services:
         condition: service_started
       pyroscope:
         condition: service_started
-      client-nodejs:
+      client-java:
         condition: service_healthy
 
   # C#: jak Rust / Go — najpierw `./compose_build.sh` (builder + volumen → publish-docker na hoście).
@@ -196,14 +196,14 @@ services:
       DEMO_PEER_RS: http://client-rust:8080/v1/pipeline
       DEMO_PEER_CS: http://client-csharp:8080/v1/pipeline
       DEMO_PEER_GO: http://client-go:8080/v1/pipeline
-      DEMO_PEER_JS: http://client-nodejs:8080/v1/pipeline
+      DEMO_PEER_JA: http://client-java:8080/v1/pipeline
       PYROSCOPE_SERVER: http://pyroscope:4040
     depends_on:
       otel:
         condition: service_started
       pyroscope:
         condition: service_started
-      client-nodejs:
+      client-java:
         condition: service_healthy
 
   client-go:
@@ -229,17 +229,47 @@ services:
       DEMO_PEER_RS: http://client-rust:8080/v1/pipeline
       DEMO_PEER_CS: http://client-csharp:8080/v1/pipeline
       DEMO_PEER_GO: http://client-go:8080/v1/pipeline
-      DEMO_PEER_JS: http://client-nodejs:8080/v1/pipeline
+      DEMO_PEER_JA: http://client-java:8080/v1/pipeline
       PYROSCOPE_SERVER: http://pyroscope:4040
     depends_on:
       otel:
         condition: service_started
       pyroscope:
         condition: service_started
-      client-nodejs:
+      client-java:
         condition: service_healthy
 
+  client-java:
+    build:
+      context: ./clients/java
+      dockerfile: Dockerfile
+    image: client_java
+    environment:
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://otel:4318/v1/traces
+      OTEL_ENVIRONMENT: local
+      OTEL_DEMO_RESOURCE_TAG: lang-java
+      OTEL_SERVICE_NAME: worker_java
+      DEMO_HTTP_ADDR: 0.0.0.0:8080
+      DEMO_HTTP_PATH: /v1/pipeline
+      DEMO_CLIENT_ID: ja
+      DEMO_PEER_PY: http://gateway-python:8080/v1/pipeline
+      DEMO_PEER_RS: http://client-rust:8080/v1/pipeline
+      DEMO_PEER_CS: http://client-csharp:8080/v1/pipeline
+      DEMO_PEER_GO: http://client-go:8080/v1/pipeline
+      DEMO_PEER_JA: http://client-java:8080/v1/pipeline
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8080 && exec 3<&-"]
+      interval: 3s
+      timeout: 5s
+      retries: 8
+      start_period: 45s
+    depends_on:
+      otel:
+        condition: service_started
+
   client-nodejs:
+    profiles:
+      - nodejs
     build:
       context: ./clients/nodejs
       dockerfile: Dockerfile
@@ -311,7 +341,7 @@ services:
       DEMO_PEER_RS: http://client-rust:8080/v1/pipeline
       DEMO_PEER_CS: http://client-csharp:8080/v1/pipeline
       DEMO_PEER_GO: http://client-go:8080/v1/pipeline
-      DEMO_PEER_JS: http://client-nodejs:8080/v1/pipeline
+      DEMO_PEER_JA: http://client-java:8080/v1/pipeline
       OTEL_SERVICE_NAME: gateway_python
       OTEL_METRIC_EXPORT_INTERVAL: "5000"
       PYROSCOPE_SERVER: http://pyroscope:4040
@@ -320,7 +350,7 @@ services:
         condition: service_started
       pyroscope:
         condition: service_started
-      client-nodejs:
+      client-java:
         condition: service_healthy
     healthcheck:
       test:
