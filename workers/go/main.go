@@ -239,6 +239,17 @@ func maxProcessingSec() float64 {
 	return f
 }
 
+func peerIDFromEnvTail(tail string) (string, error) {
+	t := strings.ToLower(strings.TrimSpace(tail))
+	if t == "py" {
+		return "", fmt.Errorf("DEMO_PEER_PY removed — use DEMO_PEER_PY_GATEWAY / DEMO_PEER_PY_WORKER (route ids py-gateway / py-worker)")
+	}
+	if strings.HasPrefix(t, "py_") {
+		return strings.ReplaceAll(t, "_", "-"), nil
+	}
+	return t, nil
+}
+
 func loadPeerMap() (map[string]string, error) {
 	raw := strings.TrimSpace(os.Getenv("DEMO_PEER_MAP"))
 	if raw != "" {
@@ -248,7 +259,10 @@ func loadPeerMap() (map[string]string, error) {
 		}
 		out := make(map[string]string)
 		for k, v := range m {
-			kk := strings.ToLower(strings.TrimSpace(k))
+			kk, err := peerIDFromEnvTail(k)
+			if err != nil {
+				return nil, err
+			}
 			vv := strings.TrimSpace(v)
 			if kk != "" && vv != "" {
 				out[kk] = vv
@@ -269,7 +283,11 @@ func loadPeerMap() (map[string]string, error) {
 			tail := strings.ToLower(strings.TrimSpace(rest))
 			vv := strings.TrimSpace(v)
 			if tail != "" && vv != "" {
-				out[tail] = vv
+				pk, err := peerIDFromEnvTail(tail)
+				if err != nil {
+					return nil, err
+				}
+				out[pk] = vv
 			}
 		}
 	}
@@ -317,9 +335,7 @@ func materializePeerHosts(peers map[string]string) map[string]string {
 		u2 := *u
 		u2.Host = net.JoinHostPort(ip, port)
 		fixed := u2.String()
-		if fixed != raw {
-			log.Printf("peer %s: %q → %q (DNS tylko przy starcie)", k, raw, fixed)
-		}
+		// Intentionally quiet: DNS materialization is expected and was too noisy in compose logs.
 		out[k] = fixed
 	}
 	return out
@@ -395,8 +411,8 @@ func validateNestedRoute(raw []routeSegment, stepI int) ([]routeSegment, error) 
 		}
 	}
 	first := strings.ToLower(strings.TrimSpace(raw[0].ID))
-	if first == "py" {
-		return nil, fmt.Errorf("processing_steps[%d].nested_route[0].id must not be 'py' (workers only)", stepI)
+	if first == "py" || first == "py-gateway" {
+		return nil, fmt.Errorf("processing_steps[%d].nested_route[0].id must not be %q (workers only)", stepI, first)
 	}
 	return raw, nil
 }

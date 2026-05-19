@@ -428,7 +428,7 @@ services:
       DEMO_PEER_CS: http://worker-csharp:8080/v1/pipeline
       DEMO_PEER_GO: http://worker-go:8080/v1/pipeline
       DEMO_PEER_JA: http://worker-java:8080/v1/pipeline
-      OTEL_SERVICE_NAME: python_worker_py_worker
+      OTEL_SERVICE_NAME: worker_python
       OTEL_METRIC_EXPORT_INTERVAL: "5000"
       PYROSCOPE_SERVER: http://pyroscope:4040
     depends_on:
