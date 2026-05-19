@@ -746,92 +746,92 @@ async fn route_mode(st: &St, parent: &Context, mut m: PipelineMsg) -> Response {
                 }
             }
         }
-    }
 
-    m.route[idx].visited = true;
-    m.visit_log.push(st.id.clone());
-    bump(&mut m, &st.id);
+        m.route[idx].visited = true;
+        m.visit_log.push(st.id.clone());
+        bump(&mut m, &st.id);
 
-    let next_idx = first_unvisited(&m.route);
-    let body_vec = match serde_json::to_vec(&m) {
-        Ok(b) => b,
-        Err(e) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+        let next_idx = first_unvisited(&m.route);
+        let body_vec = match serde_json::to_vec(&m) {
+            Ok(b) => b,
+            Err(e) => {
+                return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+            }
+        };
+
+        if let Some(ni) = next_idx {
+            let next_id = m.route[ni].id.clone();
+            let url = match peer_url(&st.peers, &next_id) {
+                Some(u) => u.clone(),
+                None => {
+                    return (
+                        StatusCode::BAD_GATEWAY,
+                        format!("no peer URL for id {next_id:?}"),
+                    )
+                        .into_response();
+                }
+            };
+            rs_line(&format!(
+                "[{}] forward to {url}: {}",
+                st.id,
+                String::from_utf8_lossy(&body_vec)
+            ));
+            let forward = t
+                .span_builder("pipeline.forward")
+                .with_kind(SpanKind::Client)
+                .start_with_context(&t, &proc_cx);
+            let forward_cx = proc_cx.clone().with_span(forward);
+            let mut hmap = http::HeaderMap::new();
+            global::get_text_map_propagator(|p| {
+                p.inject_context(&forward_cx, &mut HeaderInjector(&mut hmap))
+            });
+            let cl = reqwest::Client::new();
+            let mut rb = cl.post(&url).body(body_vec);
+            for (k, v) in hmap.iter() {
+                rb = rb.header(k, v);
+            }
+            rb = rb.header("content-type", "application/json");
+            let resp_fut = async {
+                let resp = rb.send().await.map_err(|e| e.to_string())?;
+                let c = resp.status();
+                let txt = resp.text().await.map_err(|e| e.to_string())?;
+                Ok::<(http::StatusCode, String), String>((
+                    http::StatusCode::from_u16(c.as_u16()).unwrap_or(http::StatusCode::BAD_GATEWAY),
+                    txt,
+                ))
+            }
+            .with_context(forward_cx);
+            let (status, out) = match resp_fut.await {
+                Ok(x) => x,
+                Err(e) => {
+                    return (StatusCode::BAD_GATEWAY, e).into_response();
+                }
+            };
+            st.msg_counter.add(1, &pipeline_point_kv(st.id.as_str()));
+            return Response::builder()
+                .status(status)
+                .header("content-type", "application/json")
+                .body(Body::from(out))
+                .unwrap_or_else(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response());
         }
-    };
 
-    if let Some(ni) = next_idx {
-        let next_id = m.route[ni].id.clone();
-        let url = match peer_url(&st.peers, &next_id) {
-            Some(u) => u.clone(),
-            None => {
-                return (
-                    StatusCode::BAD_GATEWAY,
-                    format!("no peer URL for id {next_id:?}"),
-                )
-                    .into_response();
+        let out = match serde_json::to_string(&m) {
+            Ok(x) => x,
+            Err(e) => {
+                return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
             }
         };
         rs_line(&format!(
-            "[{}] forward to {url}: {}",
-            st.id,
-            String::from_utf8_lossy(&body_vec)
+            "[{}] respond (terminal route): {out}",
+            st.id
         ));
-        let forward = t
-            .span_builder("pipeline.forward")
-            .with_kind(SpanKind::Client)
-            .start_with_context(&t, &hop_cx);
-        let forward_cx = hop_cx.clone().with_span(forward);
-        let mut hmap = http::HeaderMap::new();
-        global::get_text_map_propagator(|p| {
-            p.inject_context(&forward_cx, &mut HeaderInjector(&mut hmap))
-        });
-        let cl = reqwest::Client::new();
-        let mut rb = cl.post(&url).body(body_vec);
-        for (k, v) in hmap.iter() {
-            rb = rb.header(k, v);
-        }
-        rb = rb.header("content-type", "application/json");
-        let resp_fut = async {
-            let resp = rb.send().await.map_err(|e| e.to_string())?;
-            let c = resp.status();
-            let txt = resp.text().await.map_err(|e| e.to_string())?;
-            Ok::<(http::StatusCode, String), String>((
-                http::StatusCode::from_u16(c.as_u16()).unwrap_or(http::StatusCode::BAD_GATEWAY),
-                txt,
-            ))
-        }
-        .with_context(forward_cx);
-        let (status, out) = match resp_fut.await {
-            Ok(x) => x,
-            Err(e) => {
-                return (StatusCode::BAD_GATEWAY, e).into_response();
-            }
-        };
         st.msg_counter.add(1, &pipeline_point_kv(st.id.as_str()));
-        return Response::builder()
-            .status(status)
+        Response::builder()
+            .status(StatusCode::OK)
             .header("content-type", "application/json")
             .body(Body::from(out))
-            .unwrap_or_else(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response());
+            .unwrap_or_else(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response())
     }
-
-    let out = match serde_json::to_string(&m) {
-        Ok(x) => x,
-        Err(e) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
-        }
-    };
-    rs_line(&format!(
-        "[{}] respond (terminal route): {out}",
-        st.id
-    ));
-    st.msg_counter.add(1, &pipeline_point_kv(st.id.as_str()));
-    Response::builder()
-        .status(StatusCode::OK)
-        .header("content-type", "application/json")
-        .body(Body::from(out))
-        .unwrap_or_else(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response())
 }
 
 /// Continuous profiling → Pyroscope (osobno od OTLP metryk). ``PYROSCOPE_SERVER`` ustawiony i niepusty.

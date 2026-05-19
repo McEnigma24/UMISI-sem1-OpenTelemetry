@@ -2,8 +2,10 @@
  * HTTP pipeline worker (Node.js) — W3C, processing_steps, nested_route (jak Python/Rust).
  */
 import http from "node:http";
+import https from "node:https";
 import os from "node:os";
 import { randomUUID } from "node:crypto";
+import { URL } from "node:url";
 
 import {
   context,
@@ -13,24 +15,36 @@ import {
   ROOT_CONTEXT,
   SpanKind,
   SpanStatusCode,
+  diag,
+  DiagConsoleLogger,
+  DiagLogLevel,
 } from "@opentelemetry/api";
 import { logs, SeverityNumber } from "@opentelemetry/api-logs";
-import { NodeSDK } from "@opentelemetry/sdk-node";
+import { NodeTracerProvider } from "@opentelemetry/sdk-trace-node";
 import { Resource } from "@opentelemetry/resources";
-import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
+import { OTLPTraceExporter as OTLPTraceExporterHttp } from "@opentelemetry/exporter-trace-otlp-http";
+import { OTLPTraceExporter as OTLPTraceExporterGrpc } from "@opentelemetry/exporter-trace-otlp-grpc";
 import { OTLPMetricExporter } from "@opentelemetry/exporter-metrics-otlp-http";
-import { PeriodicExportingMetricReader } from "@opentelemetry/sdk-metrics";
+import {
+  PeriodicExportingMetricReader,
+  MeterProvider,
+} from "@opentelemetry/sdk-metrics";
 import { OTLPLogExporter } from "@opentelemetry/exporter-logs-otlp-http";
 import {
   LoggerProvider,
   BatchLogRecordProcessor,
 } from "@opentelemetry/sdk-logs";
+import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
 import {
   CompositePropagator,
   W3CBaggagePropagator,
   W3CTraceContextPropagator,
+  setGlobalErrorHandler,
 } from "@opentelemetry/core";
-import { AlwaysOnSampler } from "@opentelemetry/sdk-trace-base";
+import {
+  AlwaysOnSampler,
+  BatchSpanProcessor,
+} from "@opentelemetry/sdk-trace-base";
 import { SEMRESATTRS_SERVICE_NAME } from "@opentelemetry/semantic-conventions";
 
 /** TextMapGetter dla Node `req.headers` (bez importu CJS z @opentelemetry/core w ESM). */
@@ -45,6 +59,31 @@ const nodeHeaderGetter = {
     return carrier && typeof carrier === "object" ? Object.keys(carrier) : [];
   },
 };
+
+/** Carrier pod ``propagation.extract``: ``req.headers`` + brakujące W3C z ``rawHeaders`` (Go/HTTP). */
+function traceCarrierFromIncomingMessage(req) {
+  const out = {};
+  if (req.headers && typeof req.headers === "object") {
+    for (const k of Object.keys(req.headers)) {
+      out[k] = req.headers[k];
+    }
+  }
+  const rh = req.rawHeaders;
+  if (Array.isArray(rh)) {
+    for (let i = 0; i < rh.length; i += 2) {
+      const name = String(rh[i] ?? "").toLowerCase();
+      if (name !== "traceparent" && name !== "tracestate" && name !== "baggage") {
+        continue;
+      }
+      const v = rh[i + 1];
+      if (v == null) continue;
+      const cur = out[name];
+      const empty = cur === undefined || cur === null || cur === "";
+      if (empty) out[name] = v;
+    }
+  }
+  return out;
+}
 
 function envOr(k, d) {
   const v = process.env[k];
@@ -63,6 +102,33 @@ function useOtlpLogExport() {
   return !["0", "false", "no", "off"].includes(v);
 }
 
+/** Jedna linia na request: czy W3C dotarł i czy span ``pipeline.hop`` ma ten sam trace_id co extract (DEMO_OTEL_TRACE_DEBUG). */
+function traceDebugEnabled() {
+  const v = (process.env.DEMO_OTEL_TRACE_DEBUG || "").trim().toLowerCase();
+  return ["1", "true", "yes", "on"].includes(v);
+}
+
+function logPipelineTraceDebug(label, req, parentCtx, hopSpan) {
+  if (!traceDebugEnabled()) return;
+  const ts = new Date().toISOString().slice(11, 23);
+  const carrier = traceCarrierFromIncomingMessage(req);
+  const rawTp = carrier.traceparent ?? carrier.Traceparent;
+  const tpPrev =
+    rawTp == null
+      ? "(brak nagłówka)"
+      : String(Array.isArray(rawTp) ? rawTp[0] : rawTp).slice(0, 40);
+  const ext = trace.getSpanContext(parentCtx);
+  const extS = ext?.traceId
+    ? `extract trace=${ext.traceId.slice(0, 14)}… span=${ext.spanId.slice(0, 10)}… remote=${ext.isRemote}`
+    : "(extract pusty)";
+  let hopS = "";
+  if (hopSpan) {
+    const h = hopSpan.spanContext();
+    hopS = ` | hop trace=${h.traceId.slice(0, 14)}… span=${h.spanId.slice(0, 10)}…`;
+  }
+  console.log(`${ts} [otel-trace-debug] ${label} traceparent≈${tpPrev} | ${extS}${hopS}`);
+}
+
 function processMetricsEnabled() {
   const v = (process.env.DEMO_PROCESS_METRICS || "true").toLowerCase();
   return !["0", "false", "no", "off"].includes(v);
@@ -75,6 +141,27 @@ function otlpTracesEp() {
   );
 }
 
+/** OTLP/gRPC (protobuf) — ten sam kanał co :4317 na collectorze; HTTP/JSON :4318 potrafi ginąć w zapisie Jaegera dla Node. */
+function otlpTracesGrpcUrl() {
+  const o = (process.env.OTEL_EXPORTER_OTLP_TRACES_GRPC_URL || "").trim();
+  if (o) return o;
+  try {
+    const u = new URL(otlpTracesEp());
+    u.port = "4317";
+    u.pathname = "";
+    u.search = "";
+    u.hash = "";
+    return u.href.replace(/\/+$/, "");
+  } catch {
+    return "http://127.0.0.1:4317";
+  }
+}
+
+function useOtlpGrpcForTraces() {
+  const v = (process.env.DEMO_OTEL_TRACES_GRPC || "true").trim().toLowerCase();
+  return !["0", "false", "no", "off"].includes(v);
+}
+
 function otlpMetricsEp() {
   const o = process.env.OTEL_EXPORTER_OTLP_METRICS_ENDPOINT;
   if (o && String(o).trim()) return String(o).trim();
@@ -85,6 +172,11 @@ function otlpLogsEp() {
   const o = process.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT;
   if (o && String(o).trim()) return String(o).trim();
   return otlpTracesEp().replace("/v1/traces", "/v1/logs");
+}
+
+/** Agent HTTP dla eksportów OTLP — wymusza IPv4 (Node 17+ + Docker DNS: AAAA → brak nasłuchu na collectorze). */
+function otlpHttpAgentOptions() {
+  return { family: 4, keepAlive: true };
 }
 
 function maxProcessingSec() {
@@ -291,22 +383,79 @@ function pipelinePointAttrs(clientId) {
   return { ...processMetricAttrs(), client_id: clientId };
 }
 
-async function httpPostJSON(url, bodyBytes, headerObj) {
-  const headers = { ...headerObj, "content-type": "application/json" };
-  const ac = new AbortController();
-  const t = setTimeout(() => ac.abort(), 120_000);
-  try {
-    const res = await fetch(url, {
-      method: "POST",
-      body: bodyBytes,
-      headers,
-      signal: ac.signal,
+/** Outbound POST przez ``http``/``https`` (nie ``fetch``/Undici) — Undici bywa rozłączony od ALS OTel, wtedy brak spanów ``worker_nodejs`` w tym samym trace co upstream. */
+function httpPostJSON(urlStr, bodyBytes, headerObj) {
+  return new Promise((resolve, reject) => {
+    let u;
+    try {
+      u = new URL(urlStr);
+    } catch (e) {
+      reject(e);
+      return;
+    }
+    const isHttps = u.protocol === "https:";
+    const lib = isHttps ? https : http;
+    /** Małe litery — ``http.request`` + niektóre serwery są wrażliwe na wielkość kluczy W3C. */
+    const headers = {};
+    if (headerObj && typeof headerObj === "object") {
+      for (const [k, v] of Object.entries(headerObj)) {
+        if (v === undefined || v === null) continue;
+        headers[String(k).toLowerCase()] = Array.isArray(v) ? v[0] : v;
+      }
+    }
+    const ct = headers["content-type"];
+    if (ct) {
+      headers["content-type"] = ct;
+    } else {
+      headers["content-type"] = "application/json";
+    }
+
+    let settled = false;
+    let t;
+
+    const req = lib.request(
+      {
+        hostname: u.hostname,
+        port: u.port || (isHttps ? 443 : 80),
+        path: `${u.pathname}${u.search}`,
+        method: "POST",
+        headers,
+      },
+      (inc) => {
+        const chunks = [];
+        inc.on("data", (c) => chunks.push(c));
+        inc.on("error", (e) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(t);
+          reject(e);
+        });
+        inc.on("end", () => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(t);
+          resolve({ status: inc.statusCode ?? 0, body: Buffer.concat(chunks) });
+        });
+      }
+    );
+
+    t = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      req.destroy();
+      reject(new Error("HTTP request timeout"));
+    }, 120_000);
+
+    req.on("error", (e) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(t);
+      reject(e);
     });
-    const buf = Buffer.from(await res.arrayBuffer());
-    return { status: res.status, body: buf };
-  } finally {
-    clearTimeout(t);
-  }
+
+    req.write(bodyBytes);
+    req.end();
+  });
 }
 
 async function startPyroscopeIfConfigured() {
@@ -322,12 +471,23 @@ async function startPyroscopeIfConfigured() {
       serverAddress: srv,
       appName,
       tags: { demo_client_id: envOr("DEMO_CLIENT_ID", "js") },
-      wall: { collectCpuTime: true },
     });
-    Pyroscope.start();
+    // Domyślny Pyroscope.start() włącza wall + heap. Wall + @datadog/pprof na Node 22 potrafi
+    // paść w generateLabels (args.context.context undefined). Heap-only jest stabilne i nadal pushuje profil alokacji.
+    const wallOn = ["1", "true", "yes", "on"].includes(
+      (process.env.PYROSCOPE_WALL_ENABLED || "").trim().toLowerCase()
+    );
+    if (wallOn && typeof Pyroscope.start === "function") {
+      Pyroscope.start();
+    } else if (typeof Pyroscope.startHeapProfiling === "function") {
+      Pyroscope.startHeapProfiling();
+    } else {
+      Pyroscope.start();
+    }
     const ts = new Date().toISOString().slice(11, 23);
     console.warn(
-      `${ts} Pyroscope push profiler: server='${srv}' application_name='${appName}'`
+      `${ts} Pyroscope push profiler: server='${srv}' application_name='${appName}'` +
+        (wallOn ? "" : " (heap only; set PYROSCOPE_WALL_ENABLED=true to enable wall — may crash on Node 22)")
     );
   } catch (e) {
     console.warn("[nodejs] Pyroscope:", e?.message || e);
@@ -400,15 +560,20 @@ async function runPipelineOnce({
 
   const parentCtx = propagation.extract(
     ROOT_CONTEXT,
-    req.headers,
+    traceCarrierFromIncomingMessage(req),
     nodeHeaderGetter
   );
+  logPipelineTraceDebug("incoming", req, parentCtx, null);
 
   await context.with(parentCtx, async () => {
-    await tracer.startActiveSpan(
+    try {
+      /** Jawny `parentCtx` — inaczej przy async/await `active()` bywa puste i hop startuje jako nowy root (inny trace_id → brak worker_nodejs w Jaegerze dla tego trace). */
+      await tracer.startActiveSpan(
       "pipeline.hop",
       { kind: SpanKind.SERVER, attributes: { "demo.client_id": clientId } },
+      parentCtx,
       async (hopSpan) => {
+        logPipelineTraceDebug("hop-active", req, parentCtx, hopSpan);
         try {
           if (!Array.isArray(msg.route) || msg.route.length === 0) {
             hopSpan.setStatus({ code: SpanStatusCode.ERROR });
@@ -538,7 +703,7 @@ async function runPipelineOnce({
                         async (nfSpan) => {
                           const carrier = {};
                           propagation.inject(
-                            trace.setSpan(context.active(), stepSpan),
+                            trace.setSpan(ROOT_CONTEXT, nfSpan),
                             carrier,
                             {
                               set(h, k, v) {
@@ -615,7 +780,7 @@ async function runPipelineOnce({
             async (fwSpan) => {
               const carrier = {};
               propagation.inject(
-                trace.setSpan(context.active(), hopSpan),
+                trace.setSpan(ROOT_CONTEXT, fwSpan),
                 carrier,
                 {
                   set(h, k, v) {
@@ -645,6 +810,22 @@ async function runPipelineOnce({
         }
       }
     );
+    } finally {
+      try {
+        const tp = trace.getTracerProvider();
+        if (
+          tp &&
+          typeof tp.forceFlush === "function"
+        ) {
+          await Promise.race([
+            tp.forceFlush(),
+            new Promise((r) => setTimeout(r, 8000)),
+          ]);
+        }
+      } catch (e) {
+        console.error("[otel] forceFlush:", e?.message || e);
+      }
+    }
   });
 }
 
@@ -654,39 +835,110 @@ async function main() {
     return;
   }
 
+  setGlobalErrorHandler((err) => {
+    console.error("[otel] globalErrorHandler:", err);
+  });
+  const diagEn = (process.env.DEMO_OTEL_DIAG || "").trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(diagEn)) {
+    diag.setLogger(new DiagConsoleLogger(), DiagLogLevel.DEBUG);
+  }
+
   const resource = buildResource();
-  let sdk;
   let logProvider;
+  /** Ten sam provider co w register() — unika rozjazdu globalnego API vs instancja w ESM. */
+  let registeredTracerProvider = null;
 
   if (useOtlp()) {
-    /** Jak Rust: jawny W3C — inaczej przy nietypowym OTEL_PROPAGATORS extract/inject może być noop. */
+    /** Jawny W3C — inaczej przy nietypowym OTEL_PROPAGATORS extract/inject może być noop. */
     const textMapPropagator = new CompositePropagator({
       propagators: [
         new W3CTraceContextPropagator(),
         new W3CBaggagePropagator(),
       ],
     });
-    sdk = new NodeSDK({
+    const traceExporter = useOtlpGrpcForTraces()
+      ? new OTLPTraceExporterGrpc({
+          url: otlpTracesGrpcUrl(),
+          timeoutMillis: 30000,
+        })
+      : new OTLPTraceExporterHttp({
+          url: otlpTracesEp(),
+          timeoutMillis: 30000,
+          agentOptions: otlpHttpAgentOptions(),
+        });
+    /** NodeTracerProvider.register({ propagator }) ustawia też ALS context manager (Node ≥14.8). */
+    registeredTracerProvider = new NodeTracerProvider({
       resource,
-      traceExporter: new OTLPTraceExporter({ url: otlpTracesEp() }),
-      metricReader: new PeriodicExportingMetricReader({
-        exporter: new OTLPMetricExporter({ url: otlpMetricsEp() }),
-        exportIntervalMillis: 5000,
-      }),
-      textMapPropagator,
-      /** ParentBased: remote z traceparent „nie próbkuj” → domyślnie AlwaysOff — spanów nie widać w Jaegerze. */
+      mergeResourceWithDefaults: false,
+      /** Batch jak inne SDK — Simple + szybki eksport potrafi wysłać paczki inaczej niż collector→Jaeger oczekuje. */
+      spanProcessors: [
+        new BatchSpanProcessor(traceExporter, {
+          maxQueueSize: 2048,
+          maxExportBatchSize: 64,
+          scheduledDelayMillis: 100,
+          exportTimeoutMillis: 30000,
+        }),
+      ],
+      /** ParentBased + remote „nie próbkuj” → domyślnie AlwaysOff — spanów nie widać w Jaegerze. */
       sampler: new AlwaysOnSampler(),
     });
-    sdk.start();
+    const otelContextManager = new AsyncLocalStorageContextManager().enable();
+    registeredTracerProvider.register({
+      propagator: textMapPropagator,
+      contextManager: otelContextManager,
+    });
+
+    const metricExporter = new OTLPMetricExporter({
+      url: otlpMetricsEp(),
+      timeoutMillis: 30000,
+      agentOptions: otlpHttpAgentOptions(),
+    });
+    const meterProvider = new MeterProvider({
+      resource,
+      readers: [
+        new PeriodicExportingMetricReader({
+          exporter: metricExporter,
+          exportIntervalMillis: 5000,
+        }),
+      ],
+    });
+    metrics.setGlobalMeterProvider(meterProvider);
 
     if (useOtlpLogExport()) {
       logProvider = new LoggerProvider({ resource });
       logProvider.addLogRecordProcessor(
         new BatchLogRecordProcessor(
-          new OTLPLogExporter({ url: otlpLogsEp() })
+          new OTLPLogExporter({
+            url: otlpLogsEp(),
+            timeoutMillis: 30000,
+            agentOptions: otlpHttpAgentOptions(),
+          })
         )
       );
       logs.setGlobalLoggerProvider(logProvider);
+    }
+
+    try {
+      const dns = await import("node:dns/promises");
+      const traceUrl = useOtlpGrpcForTraces() ? otlpTracesGrpcUrl() : otlpTracesEp();
+      const host = new URL(traceUrl).hostname;
+      const r = await dns.lookup(host, { family: 4 });
+      const tsDns = new Date().toISOString().slice(11, 23);
+      console.log(`${tsDns} [otel] OTLP host ${host} → ${r.address} (IPv4)`);
+    } catch (e) {
+      console.warn("[otel] OTLP DNS (IPv4):", e?.message || e);
+    }
+
+    const tsOtel = new Date().toISOString().slice(11, 23);
+    const traceDest = useOtlpGrpcForTraces()
+      ? `gRPC ${otlpTracesGrpcUrl()}`
+      : otlpTracesEp();
+    console.log(
+      `${tsOtel} [otel] traces → ${traceDest} (provider=${registeredTracerProvider.constructor.name})`
+    );
+    const buildMark = (process.env.DEMO_NODE_OTEL_BUILD || "").trim();
+    if (buildMark) {
+      console.log(`${tsOtel} [otel] DEMO_NODE_OTEL_BUILD=${buildMark}`);
     }
   }
 
@@ -729,8 +981,6 @@ async function main() {
     });
   }
 
-  await startPyroscopeIfConfigured();
-
   const peers = loadPeerMap();
   const clientId = envOr("DEMO_CLIENT_ID", "js");
   const httpPath = envOr("DEMO_HTTP_PATH", "/v1/pipeline");
@@ -738,7 +988,9 @@ async function main() {
   const maxProc = maxProcessingSec();
   const { host, port } = parseHttpAddr(addr);
 
-  const tracer = trace.getTracer(svcName, "1.0.0");
+  const tracer =
+    registeredTracerProvider?.getTracer(svcName, "1.0.0") ??
+    trace.getTracer(svcName, "1.0.0");
   const logLogger =
     useOtlpLogExport() && logProvider
       ? logs.getLogger("demo.pipeline", "1.0.0")
@@ -783,6 +1035,8 @@ async function main() {
   console.log(
     `${ts} pipeline: listen http://${addr}${httpPath} client_id=${JSON.stringify(clientId)} peers=${JSON.stringify(Object.keys(peers))}`
   );
+
+  await startPyroscopeIfConfigured();
 }
 
 main().catch((e) => {

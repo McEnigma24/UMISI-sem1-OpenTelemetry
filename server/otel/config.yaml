@@ -18,6 +18,11 @@ exporters:
     endpoint: jaeger:4317
     tls:
       insecure: true
+    retry_on_failure:
+      enabled: true
+      initial_interval: 1s
+      max_interval: 5s
+      max_elapsed_time: 30s
   otlp/tempo:
     endpoint: tempo:4317
     tls:

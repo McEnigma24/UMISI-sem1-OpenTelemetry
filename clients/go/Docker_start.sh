@@ -2,7 +2,8 @@
 set -euo pipefail
 cd /workspace
 mkdir -p docker-target
-# Brak go.sum na hoście / GOFLAGS=-mod=readonly → „missing go.sum entry”. Tidy + -mod=mod uzupełniają sumy w volumenie.
-go mod download
-go mod tidy
-exec go build -mod=mod -trimpath -ldflags="-s -w" -o docker-target/client_go .
+# Bez pobierania łańcucha narzędzi z sieci (go.mod „toolchain” → proxy.golang.org).
+export GOTOOLCHAIN=local
+# Bez `go mod download` / `go mod tidy` przy każdym buildzie (sieć + czas). Moduły są w volumenie Docker (docker_build.sh → /go/pkg/mod).
+# Po zmianie zależności na hoście: `go mod tidy` (lokalnie), potem build kontenera.
+exec go build -mod=readonly -trimpath -ldflags="-s -w" -o docker-target/client_go .

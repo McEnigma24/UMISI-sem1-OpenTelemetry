@@ -11,6 +11,7 @@ RUN apt-get update -y \
 WORKDIR /app
 
 FROM golang:1.23-bookworm AS dev-env
+ENV GOTOOLCHAIN=local
 WORKDIR /workspace
 
 FROM dev-env AS builder

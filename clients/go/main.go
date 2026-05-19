@@ -9,7 +9,9 @@ import (
 	"io"
 	"log"
 	"math"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"runtime"
 	"strconv"
@@ -40,7 +42,25 @@ import (
 
 // --- JSON (format jak traffic generator / Python) ---
 
-var httpClient = &http.Client{Timeout: 120 * time.Second}
+// PreferGo: stabilniejsze zapytania do 127.0.0.11 (embedded DNS) niż domyślny libc na części obrazów/WSL.
+var httpClient = &http.Client{
+	Timeout: 120 * time.Second,
+	Transport: &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+			Resolver: &net.Resolver{
+				PreferGo: true,
+			},
+		}).DialContext,
+		ForceAttemptHTTP2:     false,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	},
+}
 
 type processingStep struct {
 	Activity    string         `json:"activity"`
@@ -256,6 +276,68 @@ func loadPeerMap() (map[string]string, error) {
 	return out, nil
 }
 
+// materializePeerHosts zamienia nazwy serwisów Dockera (np. client-nodejs) na adres IP z jednorazowego
+// LookupHost przy starcie — unika powtarzalnego DNS 127.0.0.11 na każdym forwardzie (WSL/UDP timeout).
+// Po zmianie IP peera (redeploy) zrestartuj tego workera.
+func materializePeerHosts(peers map[string]string) map[string]string {
+	r := &net.Resolver{PreferGo: true}
+	out := make(map[string]string, len(peers))
+	for k, raw := range peers {
+		u, err := url.Parse(raw)
+		if err != nil || u.Host == "" {
+			out[k] = raw
+			continue
+		}
+		host := u.Hostname()
+		port := u.Port()
+		if port == "" {
+			if u.Scheme == "https" {
+				port = "443"
+			} else {
+				port = "80"
+			}
+		}
+		if host == "" || net.ParseIP(host) != nil {
+			out[k] = raw
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		addrs, err := r.LookupHost(ctx, host)
+		cancel()
+		if err != nil || len(addrs) == 0 {
+			log.Printf("peer materialize: lookup %q (%s): %v — zostaje hostname w URL", host, k, err)
+			out[k] = raw
+			continue
+		}
+		ip := pickDialIP(addrs)
+		if ip == "" {
+			out[k] = raw
+			continue
+		}
+		u2 := *u
+		u2.Host = net.JoinHostPort(ip, port)
+		fixed := u2.String()
+		if fixed != raw {
+			log.Printf("peer %s: %q → %q (DNS tylko przy starcie)", k, raw, fixed)
+		}
+		out[k] = fixed
+	}
+	return out
+}
+
+func pickDialIP(addrs []string) string {
+	for _, a := range addrs {
+		ip := net.ParseIP(a)
+		if ip != nil && ip.To4() != nil {
+			return ip.String()
+		}
+	}
+	if len(addrs) > 0 {
+		return addrs[0]
+	}
+	return ""
+}
+
 func parseProcessingTime(s string, capSec float64) (float64, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -469,7 +551,18 @@ func maybePyroscope() (stop func(), err error) {
 	return func() { _ = py.Stop() }, nil
 }
 
-func httpPostJSON(ctx context.Context, url string, body []byte, hdr http.Header) (int, []byte, error) {
+func transientPipelineHTTPDialErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	// Nie powtarzaj błędów DNS — kilka prób × timeout resolvera daje ~50s w Jaegerze.
+	return strings.Contains(s, "connection refused") ||
+		strings.Contains(s, "connection reset by peer") ||
+		strings.Contains(s, "no route to host")
+}
+
+func httpPostJSONAttempt(ctx context.Context, url string, body []byte, hdr http.Header) (int, []byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return 0, nil, err
@@ -489,6 +582,33 @@ func httpPostJSON(ctx context.Context, url string, body []byte, hdr http.Header)
 	defer resp.Body.Close()
 	b, err := io.ReadAll(resp.Body)
 	return resp.StatusCode, b, err
+}
+
+func httpPostJSON(ctx context.Context, url string, body []byte, hdr http.Header) (int, []byte, error) {
+	const maxAttempts = 3
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if attempt > 0 {
+			backoff := time.Duration(80+attempt*120) * time.Millisecond
+			t := time.NewTimer(backoff)
+			select {
+			case <-ctx.Done():
+				t.Stop()
+				return 0, nil, ctx.Err()
+			case <-t.C:
+			}
+			t.Stop()
+		}
+		code, b, err := httpPostJSONAttempt(ctx, url, body, hdr)
+		if err == nil {
+			return code, b, nil
+		}
+		lastErr = err
+		if !transientPipelineHTTPDialErr(err) {
+			return 0, nil, err
+		}
+	}
+	return 0, nil, lastErr
 }
 
 func (st *appState) handlePipeline(w http.ResponseWriter, r *http.Request) {
@@ -682,7 +802,7 @@ func (st *appState) handlePipeline(w http.ResponseWriter, r *http.Request) {
 	}
 	st.goLine(fmt.Sprintf("[%s] forward to %s: %s", st.clientID, nextURL, string(outBody)))
 
-	fwCtx, fwSpan := tr.Start(ctx, "pipeline.forward",
+	fwCtx, fwSpan := tr.Start(ctx2, "pipeline.forward",
 		trace.WithSpanKind(trace.SpanKindClient),
 		trace.WithAttributes(attribute.String("http.url", strings.TrimSpace(nextURL))),
 	)
@@ -730,8 +850,10 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
+		// SimpleSpanProcessor: każdy span idzie na OTLP od razu po End — Jaeger nie pokazuje
+		// „sierot”, gdy dziecko (np. drugi worker_go) trafia do backendu przed rodzicem z batcha.
 		tp = sdktrace.NewTracerProvider(
-			sdktrace.WithBatcher(texp),
+			sdktrace.WithSpanProcessor(sdktrace.NewSimpleSpanProcessor(texp)),
 			sdktrace.WithResource(res),
 		)
 	} else {
@@ -829,6 +951,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("peer map: %v", err)
 	}
+	peers = materializePeerHosts(peers)
 
 	clientID := strings.TrimSpace(envOr("DEMO_CLIENT_ID", "go"))
 	httpPath := envOr("DEMO_HTTP_PATH", "/v1/pipeline")

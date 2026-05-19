@@ -1,20 +1,8 @@
 #!/usr/bin/env bash
+# Jak clients/go: wywoływany z compose_build przez ``( cd clients/nodejs && ./docker_build.sh )``.
+# Buduje obraz ``client-nodejs`` (Dockerfile: npm install + index.mjs z kontekstu ./clients/nodejs).
 set -euo pipefail
-img_name="builder"
-
-docker build --target "$img_name" -t "client_nodejs-$img_name" .
-
-docker image prune -f
-
-docker_run_flags=(--rm)
-if [ -t 0 ] && [ -t 1 ]; then
-  docker_run_flags+=(-it)
-else
-  docker_run_flags+=(-i)
-fi
-
-docker run "${docker_run_flags[@]}" \
-  -v "$(pwd):/workspace" \
-  "client_nodejs-$img_name"
-
-docker container prune -f
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+cd "$REPO_ROOT"
+exec docker compose build client-nodejs

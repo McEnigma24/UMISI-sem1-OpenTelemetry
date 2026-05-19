@@ -15,7 +15,7 @@ echo "compose_build: Go (Dockerfile builder + volumen /workspace)…"
 ( cd clients/go && ./docker_build.sh )
 
 clear
-echo "compose_build: Node.js (Dockerfile builder + volumen /workspace)…"
+echo "compose_build: Node.js (Dockerfile: npm install + index.mjs)…"
 ( cd clients/nodejs && ./docker_build.sh )
 
 clear

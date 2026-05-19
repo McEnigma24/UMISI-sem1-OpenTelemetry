@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 img_name="builder"
+# Jedna wolumen-cache na maszynę — kolejne buildy Go bez ponownego ściągania modułów z sieci.
+gomod_vol="${GOMOD_CACHE_VOLUME:-umisi_client_go_gomodcache}"
+docker volume inspect "$gomod_vol" >/dev/null 2>&1 || docker volume create "$gomod_vol" >/dev/null
 
 docker build --target "$img_name" -t "client_go-$img_name" .
 
@@ -15,6 +18,7 @@ fi
 
 docker run "${docker_run_flags[@]}" \
   -v "$(pwd):/workspace" \
+  -v "${gomod_vol}:/go/pkg/mod" \
   "client_go-$img_name"
 
 docker container prune -f

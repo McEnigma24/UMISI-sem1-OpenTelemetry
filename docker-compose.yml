@@ -16,6 +16,9 @@
 # HTTP pipeline: niepusty JSON ``route`` + DEMO_PEER_* (mapa hopów). Z hosta gateway: http://127.0.0.1:18080
 # (POST /v1/pipeline; ``localhost`` bywa IPv6 — lepiej 127.0.0.1). Diagnoza: ``docker compose ps``, logi
 # ``gateway-python`` / ``client-csharp`` / ``client-rust`` / ``client-go`` / ``client-nodejs``; pierwsze sekundy po starcie workery mogą jeszcze nie forwardować.
+# ``client-nodejs`` ma healthcheck; workery z ``DEMO_PEER_JS`` czekają na ``service_healthy`` — inaczej Go/Rust/C#/gateway
+#   mogą dostać ``lookup client-nodejs … i/o timeout`` (DNS 127.0.0.11) przy pierwszym hopie do JS.
+# Nie ustawiaj ``dns_opt: use-vc`` na tych serwisach: embedded DNS Dockera potrafi wtedy zwracać ``invalid DNS response``.
 # Pyroscope push (log startowy ten sam): Python ``pyroscope-io``, Rust ``pyroscope``, Go ``pyroscope-go``, Node ``@pyroscope/nodejs``.
 # C# — bez wbudowanego push CPU (profiler natywny wymaga osobnego obrazu / zmiennych CORECLR_*); tylko spójny komunikat + ``PYROSCOPE_SERVER``.
 # Stub traffic_generator: compose lub ręcznie: cd stub/sender/python_traffic_generator && ./docker_run.sh
@@ -133,7 +136,8 @@ services:
   #     otel:
   #       condition: service_started
 
-  # Rust / C# / Go / Node.js: najpierw `./compose_build.sh` (volume → docker-target + publish-docker), potem szybki runner w compose.
+  # Rust / C# / Go: najpierw `./compose_build.sh` (volume → docker-target / publish-docker), potem runner w compose.
+  # Node.js: `docker compose build client-nodejs` buduje z `clients/nodejs` (npm ci + index.mjs) — nie zależy od publish-docker/.
   client-rust:
     build:
       context: ./clients/rust
@@ -164,8 +168,10 @@ services:
         condition: service_started
       pyroscope:
         condition: service_started
+      client-nodejs:
+        condition: service_healthy
 
-  # C#: jak Rust / Go / Node — najpierw `./compose_build.sh` (builder + volumen → publish-docker na hoście).
+  # C#: jak Rust / Go — najpierw `./compose_build.sh` (builder + volumen → publish-docker na hoście).
   client-csharp:
     build:
       context: ./clients/csharp
@@ -197,6 +203,8 @@ services:
         condition: service_started
       pyroscope:
         condition: service_started
+      client-nodejs:
+        condition: service_healthy
 
   client-go:
     build:
@@ -228,6 +236,8 @@ services:
         condition: service_started
       pyroscope:
         condition: service_started
+      client-nodejs:
+        condition: service_healthy
 
   client-nodejs:
     build:
@@ -245,6 +255,12 @@ services:
       OTEL_DEMO_RESOURCE_TAG: lang-nodejs
       OTEL_SERVICE_NAME: worker_nodejs
       OTEL_METRIC_EXPORT_INTERVAL: "5000"
+      NODE_OPTIONS: "--dns-result-order=ipv4first"
+      # Potwierdzenie w logach, że podniesiono nowy obraz (po zmianach OTel/Node).
+      # DEMO_OTEL_TRACES_GRPC: "false"  # wróć do OTLP/HTTP :4318 dla trace’ów (diag)
+      DEMO_NODE_OTEL_BUILD: "traces-otlp-grpc4317+batch-bsp+parentctx-20260519"
+      # DEMO_OTEL_TRACE_DEBUG: "true"  # stderr: [otel-trace-debug] — traceparent z Go + extract vs span pipeline.hop (ten sam trace_id?)
+      # DEMO_OTEL_DIAG: "true"  # stderr: Diag DEBUG (eksport OTLP, propagacja); gdy dalej brak worker_nodejs w Jaegerze
       DEMO_HTTP_ADDR: 0.0.0.0:8080
       DEMO_HTTP_PATH: /v1/pipeline
       DEMO_CLIENT_ID: js
@@ -254,6 +270,18 @@ services:
       DEMO_PEER_GO: http://client-go:8080/v1/pipeline
       DEMO_PEER_JS: http://client-nodejs:8080/v1/pipeline
       PYROSCOPE_SERVER: http://pyroscope:4040
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "const c=require('net').createConnection({port:8080,host:'127.0.0.1'});c.on('connect',()=>{c.end();process.exit(0)});c.on('error',()=>process.exit(1));setTimeout(()=>process.exit(1),4000);",
+        ]
+      interval: 3s
+      timeout: 5s
+      retries: 8
+      start_period: 45s
     depends_on:
       otel:
         condition: service_started
@@ -292,6 +320,8 @@ services:
         condition: service_started
       pyroscope:
         condition: service_started
+      client-nodejs:
+        condition: service_healthy
     healthcheck:
       test:
         [

@@ -75,3 +75,10 @@ docker pull otel/opentelemetry-collector-contrib:latest
 #   OTEL_SERVICE_INSTANCE_ID
 #   OTEL_ENVIRONMENT / DEPLOYMENT_ENVIRONMENT
 #   OTEL_DEMO_RESOURCE_TAG  (→ demo.instance.tag w backendzie)
+#
+# Inspekcja trace w Jaegerze po API (czy są spany worker_nodejs itd.):
+#   cd UMISI-sem1-OpenTelemetry && chmod +x scripts/jaeger_inspect_trace.sh
+#   ./scripts/jaeger_inspect_trace.sh 318482eed3b2f14612ae26c743e7ec05
+#   JAEGER_URL=http://127.0.0.1:16686 ./scripts/jaeger_inspect_trace.sh <trace_id_hex> worker_nodejs
+# Lista serwisów w Jaegerze (czy w ogóle jest worker_nodejs):
+#   chmod +x scripts/jaeger_list_services.sh && ./scripts/jaeger_list_services.sh
