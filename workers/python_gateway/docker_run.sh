@@ -11,6 +11,6 @@ docker run --rm -it \
   -e OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://host.docker.internal:4318/v1/logs \
   -e OTEL_ENVIRONMENT=local \
   -e OTEL_DEMO_RESOURCE_TAG=lang-python \
-  worker_python
+  python_gateway
 
 docker container prune -f

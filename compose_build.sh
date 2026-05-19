@@ -25,7 +25,7 @@ clear
 # echo "compose_build: Node.js …"
 # ( cd workers/nodejs && ./docker_build.sh )
 
-clear
+
 echo "compose_build: Docker Compose (m.in. gateway_python, worker_python, otel, … — równolegle)…"
 # Obrazy Python: osobne projekty — ``python_gateway/Dockerfile`` → ``gateway_python``,
 # ``workers/python_worker/Dockerfile`` → ``worker_python`` (oba context: katalog repo).

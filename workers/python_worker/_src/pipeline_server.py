@@ -256,7 +256,7 @@ def _bump_counter_table(data: dict[str, Any], worker_id: str) -> None:
 
 
 def _forward_to_next(url: str, body: bytes) -> tuple[int, bytes]:
-    """Forward z W3C — identycznie jak w działającym historycznie ``workers/python``."""
+    """Forward z W3C — identycznie jak w działającym historycznie ``workers/python_gateway``."""
     carrier: dict[str, str] = {}
     inject(carrier)
     current_span = trace.get_current_span()
