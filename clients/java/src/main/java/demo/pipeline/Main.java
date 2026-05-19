@@ -20,11 +20,19 @@ import io.opentelemetry.context.propagation.ContextPropagators;
 import io.opentelemetry.context.propagation.TextMapGetter;
 import io.opentelemetry.context.propagation.TextMapPropagator;
 import io.opentelemetry.context.propagation.TextMapSetter;
+import io.opentelemetry.exporter.otlp.http.metrics.OtlpHttpMetricExporter;
 import io.opentelemetry.exporter.otlp.http.trace.OtlpHttpSpanExporter;
+import io.opentelemetry.api.metrics.Meter;
 import io.opentelemetry.sdk.OpenTelemetrySdk;
+import io.opentelemetry.sdk.metrics.SdkMeterProvider;
+import io.opentelemetry.sdk.metrics.export.PeriodicMetricReader;
 import io.opentelemetry.sdk.resources.Resource;
 import io.opentelemetry.sdk.trace.SdkTracerProvider;
 import io.opentelemetry.sdk.trace.export.BatchSpanProcessor;
+import io.pyroscope.http.Format;
+import io.pyroscope.javaagent.EventType;
+import io.pyroscope.javaagent.PyroscopeAgent;
+import io.pyroscope.javaagent.config.Config;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -33,8 +41,14 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.lang.management.ManagementFactory;
+import java.lang.management.MemoryMXBean;
+import com.sun.management.OperatingSystemMXBean;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
@@ -44,7 +58,9 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * Pipeline worker HTTP (POST JSON) — kontrakt jak Python/Go/Rust. Domyślnie {@code DEMO_CLIENT_ID=ja} (segment {@code "id":"ja"} w trasie).
+ * Pipeline worker HTTP (POST JSON) — kontrakt jak Python/Go/Rust. Domyślnie {@code DEMO_CLIENT_ID=ja}.
+ * Metryki OTLP: {@code demo.process.cpu.utilization}, {@code demo.process.memory.usage} (jak Go/Python),
+ * wyłącz {@code DEMO_PROCESS_METRICS=false}. Pyroscope: {@code PYROSCOPE_SERVER}, wyłącz {@code PYROSCOPE_ENABLED=false}.
  */
 public final class Main {
 
@@ -67,6 +83,9 @@ public final class Main {
 
   private static final TextMapSetter<Map<String, String>> MAP_SETTER = Map::put;
 
+  private static final DateTimeFormatter CLOCK_FMT =
+      DateTimeFormatter.ofPattern("HH:mm:ss.SSS");
+
   public static void main(String[] args) throws Exception {
     String mode = env("DEMO_MODE", "pipeline").toLowerCase(Locale.ROOT);
     if ("exercises".equals(mode)) {
@@ -75,7 +94,9 @@ public final class Main {
     }
 
     String tracesEp = env("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://127.0.0.1:4318/v1/traces");
+    String metricsEp = otlpMetricsEndpoint(tracesEp);
     String svc = env("OTEL_SERVICE_NAME", "worker_java");
+    String clientId = env("DEMO_CLIENT_ID", "ja");
     String envName = firstNonBlank(env("OTEL_ENVIRONMENT", ""), env("DEPLOYMENT_ENVIRONMENT", "local"));
     String tag = env("OTEL_DEMO_RESOURCE_TAG", "").trim();
     String iid = env("OTEL_SERVICE_INSTANCE_ID", "").trim();
@@ -107,17 +128,52 @@ public final class Main {
             .addSpanProcessor(BatchSpanProcessor.builder(spanExporter).build())
             .build();
 
+    SdkMeterProvider meterProvider = null;
+    if (processMetricsEnabled()) {
+      OtlpHttpMetricExporter metricExporter =
+          OtlpHttpMetricExporter.builder()
+              .setEndpoint(metricsEp)
+              .setTimeout(Duration.ofSeconds(30))
+              .build();
+      PeriodicMetricReader reader =
+          PeriodicMetricReader.builder(metricExporter)
+              .setInterval(metricExportInterval())
+              .build();
+      meterProvider =
+          SdkMeterProvider.builder().setResource(resource).registerMetricReader(reader).build();
+    }
+
     TextMapPropagator propagator = W3CTraceContextPropagator.getInstance();
-    OpenTelemetrySdk sdk =
+    var sdkB =
         OpenTelemetrySdk.builder()
             .setTracerProvider(tracerProvider)
-            .setPropagators(ContextPropagators.create(propagator))
-            .buildAndRegisterGlobal();
+            .setPropagators(ContextPropagators.create(propagator));
+    if (meterProvider != null) {
+      sdkB.setMeterProvider(meterProvider);
+    }
+    OpenTelemetrySdk sdk = sdkB.buildAndRegisterGlobal();
 
+    if (meterProvider != null) {
+      registerProcessObservableGauges(sdk.getMeter("demo.pipeline"), svc, clientId);
+    }
+
+    maybeStartPyroscope(svc, clientId);
+
+    final SdkMeterProvider mpFinal = meterProvider;
     Runtime.getRuntime()
         .addShutdownHook(
             new Thread(
                 () -> {
+                  try {
+                    PyroscopeAgent.stop();
+                  } catch (Throwable ignored) {
+                  }
+                  try {
+                    if (mpFinal != null) {
+                      mpFinal.shutdown().join(10, java.util.concurrent.TimeUnit.SECONDS);
+                    }
+                  } catch (Exception ignored) {
+                  }
                   try {
                     sdk.getSdkTracerProvider().shutdown().join(10, java.util.concurrent.TimeUnit.SECONDS);
                   } catch (Exception ignored) {
@@ -126,7 +182,6 @@ public final class Main {
 
     String httpAddr = env("DEMO_HTTP_ADDR", "0.0.0.0:8080");
     String httpPath = env("DEMO_HTTP_PATH", "/v1/pipeline");
-    String clientId = env("DEMO_CLIENT_ID", "ja");
     Map<String, String> peers = loadPeerMap();
     double maxProc = parseMaxProcessingSec();
 
@@ -214,6 +269,120 @@ public final class Main {
       }
     }
     return out;
+  }
+
+  private static String otlpMetricsEndpoint(String tracesEp) {
+    String o = System.getenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT");
+    if (o != null && !o.trim().isEmpty()) {
+      return o.trim();
+    }
+    return tracesEp.replace("/v1/traces", "/v1/metrics");
+  }
+
+  private static boolean processMetricsEnabled() {
+    String v = env("DEMO_PROCESS_METRICS", "true").toLowerCase(Locale.ROOT);
+    return !(v.equals("0") || v.equals("false") || v.equals("no") || v.equals("off"));
+  }
+
+  private static Duration metricExportInterval() {
+    String s = env("OTEL_METRIC_EXPORT_INTERVAL", "5000");
+    try {
+      long ms = Long.parseLong(s.trim());
+      if (ms < 1000L) {
+        ms = 5000L;
+      }
+      return Duration.ofMillis(ms);
+    } catch (NumberFormatException e) {
+      return Duration.ofSeconds(5);
+    }
+  }
+
+  private static double jvmProcessCpuLoadPercent() {
+    var os = ManagementFactory.getOperatingSystemMXBean();
+    if (os instanceof OperatingSystemMXBean mx) {
+      double v = mx.getProcessCpuLoad();
+      if (v >= 0.0 && !Double.isNaN(v)) {
+        return Math.min(100.0, Math.max(0.0, v * 100.0));
+      }
+    }
+    return -1.0;
+  }
+
+  private static long jvmMemoryUsedBytes() {
+    MemoryMXBean m = ManagementFactory.getMemoryMXBean();
+    return m.getHeapMemoryUsage().getUsed() + m.getNonHeapMemoryUsage().getUsed();
+  }
+
+  private static void registerProcessObservableGauges(Meter meter, String svc, String clientId) {
+    Attributes pointAttrs =
+        Attributes.builder()
+            .put("service.name", svc)
+            .put("demo.client_id", clientId)
+            .build();
+    meter
+        .gaugeBuilder("demo.process.cpu.utilization")
+        .setDescription("Użycie CPU procesu JVM 0–100 (OperatingSystemMXBean)")
+        .setUnit("%")
+        .buildWithCallback(
+            m -> {
+              double p = jvmProcessCpuLoadPercent();
+              if (p >= 0.0) {
+                m.record(p, pointAttrs);
+              }
+            });
+    meter
+        .gaugeBuilder("demo.process.memory.usage")
+        .setDescription("Heap + non-heap used (bajty); przybliżenie RSS JVM")
+        .setUnit("By")
+        .buildWithCallback(m -> m.record((double) jvmMemoryUsedBytes(), pointAttrs));
+  }
+
+  private static boolean pyroscopePushEnabled() {
+    String v = env("PYROSCOPE_ENABLED", "true").toLowerCase(Locale.ROOT);
+    if (v.equals("0") || v.equals("false") || v.equals("no") || v.equals("off")) {
+      return false;
+    }
+    String srv = pyroscopeServerOrEmpty();
+    return !srv.isEmpty();
+  }
+
+  private static String pyroscopeServerOrEmpty() {
+    String s = System.getenv("PYROSCOPE_SERVER");
+    if (s != null && !s.trim().isEmpty()) {
+      return s.trim();
+    }
+    s = System.getenv("PYROSCOPE_SERVER_ADDRESS");
+    return s != null ? s.trim() : "";
+  }
+
+  private static void maybeStartPyroscope(String svc, String clientId) {
+    if (!pyroscopePushEnabled()) {
+      return;
+    }
+    String server = pyroscopeServerOrEmpty();
+    try {
+      Map<String, String> labels = new HashMap<>();
+      labels.put("service_name", svc);
+      labels.put("demo_client_id", clientId);
+      Config cfg =
+          new Config.Builder()
+              .setApplicationName(svc)
+              .setServerAddress(server)
+              .setFormat(Format.JFR)
+              .setProfilingEvent(EventType.ITIMER)
+              .setLabels(labels)
+              .build();
+      PyroscopeAgent.start(cfg);
+      System.out.println(
+          CLOCK_FMT.format(LocalDateTime.now(ZoneId.systemDefault()))
+              + " Pyroscope push profiler: server='"
+              + server
+              + "' application_name='"
+              + svc
+              + "'");
+    } catch (Throwable t) {
+      System.err.println("Pyroscope: " + t);
+    }
   }
 
   /** Parsowanie JSON bez zależności od {@code com.google.gson.JsonParser}. */

@@ -82,7 +82,7 @@ services:
         condition: service_started
 
   # Profiling (Grafana Pyroscope). Drilldown „Profiles / Diff flame graph” = dwa zakresy czasu profilu CPU
-  #   (continuous profiling), nie porównanie dwóch trace_id. ``gateway-python``, ``client-rust``, ``client-go``, ``client-nodejs`` (profil ``nodejs``) wysyłają push
+  #   (continuous profiling), nie porównanie dwóch trace_id. ``gateway-python``, ``client-rust``, ``client-go``, ``client-java``, ``client-nodejs`` (profil ``nodejs``) wysyłają push
   #   profili (PYROSCOPE_SERVER); C# — brak push profilu CPU w tym obrazie (profiler .NET osobno). Trace→span profil: ``pyroscope.profile.id`` osobno.
   # Dok.: https://grafana.com/docs/pyroscope/latest/configure-client/
   pyroscope:
@@ -245,10 +245,14 @@ services:
       dockerfile: Dockerfile
     image: client_java
     environment:
+      OTEL_DEMO_TRACE_EXPORT: otlp
       OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://otel:4318/v1/traces
+      OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: http://otel:4318/v1/metrics
+      OTEL_METRIC_EXPORT_INTERVAL: "5000"
       OTEL_ENVIRONMENT: local
       OTEL_DEMO_RESOURCE_TAG: lang-java
       OTEL_SERVICE_NAME: worker_java
+      PYROSCOPE_SERVER: http://pyroscope:4040
       DEMO_HTTP_ADDR: 0.0.0.0:8080
       DEMO_HTTP_PATH: /v1/pipeline
       DEMO_CLIENT_ID: ja
@@ -265,6 +269,8 @@ services:
       start_period: 45s
     depends_on:
       otel:
+        condition: service_started
+      pyroscope:
         condition: service_started
 
   client-nodejs:
