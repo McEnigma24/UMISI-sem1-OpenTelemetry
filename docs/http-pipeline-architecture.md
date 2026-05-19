@@ -4,21 +4,23 @@ Dokument opisuje przepływ żądań demo (`POST /v1/pipeline`), pliki `routes/*`
 
 ## 1. Ruch HTTP — Python API, workery, traffic generator
 
-Gateway (`gateway-python`) to **Python API** (`DEMO_WORKER_ID: py`). Workery to osobne serwisy HTTP z tym samym endpointem `/v1/pipeline`; kolejne hopy to żądania do adresów z `DEMO_PEER_*` w `docker-compose.yml`.
+Gateway (`gateway-python`, `DEMO_WORKER_ID=py-gateway`) i drugi kontener Python (`worker-python`, `py-worker`) — oba z endpointem `/v1/pipeline`; kolejne hopy to żądania do adresów z `DEMO_PEER_*` w `docker-compose.yml` (m.in. `DEMO_PEER_PY_GATEWAY`, `DEMO_PEER_PY_WORKER`).
 
-Poniższy diagram odpowiada **konkretnie** plikowi `stub/sender/python_traffic_generator/routes/3-nested-route.json`: główna tablica `route` to **py → rs → cs**, a w segmencie **rs** jeden z kroków `processing_steps` ma pole **`nested_route`** (łańcuch **go → ja → rs → go**). Każda strzałka to osobne żądanie **POST /v1/pipeline** z przekazywanym JSON-em trasy (w praktyce odpowiedzi HTTP wracają synchronicznie przed kolejnym forwardem — na diagramie pominięto zwroty, żeby nie zaciemniać).
+Tryb kodu biblioteki Python dla węzła **`py-worker`**: eksportuj **`PYTHON_WORKER_MODE`** (`complete` | `incomplete`) przed `./compose_run.sh` — podstawia się do serwisu **`worker-python`** w `docker-compose.yml`. Kontener **`gateway-python`** (`py-gateway`) ma zawsze **`PYTHON_WORKER_MODE=complete`** (osobno od labu). Nie uruchamiaj dwóch instancji stacku z różnym trybem dla tego samego id `py-worker`.
+
+Poniższy diagram odpowiada **konkretnie** plikowi `stub/sender/python_traffic_generator/routes/3-nested-route.json`: główna tablica `route` to **py-gateway → rs → cs**, a w segmencie **rs** jeden z kroków `processing_steps` ma pole **`nested_route`** (łańcuch **go → ja → rs → go**). Każda strzałka to osobne żądanie **POST /v1/pipeline** z przekazywanym JSON-em trasy (w praktyce odpowiedzi HTTP wracają synchronicznie przed kolejnym forwardem — na diagramie pominięto zwroty, żeby nie zaciemniać).
 
 ```mermaid
 sequenceDiagram
   participant TG as traffic_generator
-  participant PY as Python API (py)
+  participant PY as Python API (py-gateway)
   participant RS as worker-rust (rs)
   participant GO as worker-go (go)
   participant JA as worker-java (ja)
   participant CS as worker-csharp (cs)
 
   TG->>PY: POST /v1/pipeline (payload = 3-nested-route.json)
-  PY->>RS: forward — pierwszy nieodwiedzony hop po py
+  PY->>RS: forward — pierwszy nieodwiedzony hop po py-gateway
 
   rect rgb(245, 250, 255)
     Note over RS, GO: W rs: krok nested-worker-chain → nested_route
@@ -37,13 +39,13 @@ Z hosta domyślny cel generatora to zwykle `http://127.0.0.1:18080/v1/pipeline` 
 
 ## 2. Pliki `routes/*` (treść body żądania HTTP)
 
-Wspólny szkielet JSON: tablica **`route`** — kolejność hopów; każdy hop ma **`id`** (`py` | `rs` | `cs` | `go` | `ja`), **`processing_steps`**, opcjonalnie w kroku pole **`nested_route`** (zagnieżdżony łańcuch hopów).
+Wspólny szkielet JSON: tablica **`route`** — kolejność hopów; każdy hop ma **`id`** (`py-gateway` | `py-worker` | `rs` | `cs` | `go` | `ja`; samo **`py`** jest niedozwolone), **`processing_steps`**, opcjonalnie w kroku pole **`nested_route`** (zagnieżdżony łańcuch hopów).
 
 | Plik | Opis |
 |------|------|
-| `routes/1-route.json` | Trasa **py → rs → cs**, krótkie kroki. |
-| `routes/2-slow_route.json` | Ta sama kolejność; na **rs** jeden długi krok (wysoka wartość `time`) — „wolna” ścieżka. |
-| `routes/3-nested-route.json` | **py → rs → cs**; na **rs** krok **`nested-worker-chain`** z **`nested_route`**: **go → ja → rs → go** (osobne POST-y zagnieżdżone w obsłudze rs), potem hop do **cs**. |
+| `routes/1-route.json` | Trasa **py-gateway → rs → cs**, krótkie kroki. |
+| `routes/2-slow-route.json` | Ta sama kolejność; na **rs** jeden długi krok (wysoka wartość `time`) — „wolna” ścieżka. |
+| `routes/3-nested-route.json` | **py-gateway → rs → cs**; na **rs** krok **`nested-worker-chain`** z **`nested_route`**: **go → ja → rs → go** (osobne POST-y zagnieżdżone w obsłudze rs), potem hop do **cs**. |
 
 ---
 
@@ -85,7 +87,7 @@ flowchart LR
 
 ## 4. Powiązane ścieżki w repozytorium
 
-- Implementacje workerów: `workers/` (Python gateway, Rust, C#, Go, Java, opcj. Node.js)
+- Implementacje workerów: `workers/` — Python: **`gateway-python`** (obraz `gateway_python`, punkt wejścia `python_gateway/main.py`, `py-gateway`, `DEMO_PYTHON_TIER=gateway`, zawsze tryb `complete`) oraz **`worker-python`** (obraz `worker_python`, `workers/python_worker/entrypoint_worker.py`, `py-worker`, `DEMO_PYTHON_TIER=worker`; `PYTHON_WORKER_MODE` z env: `complete` | `incomplete`). W każdym obrazie są oba warianty kodu pod `/app/modes/…`. Szablon labowy źródłowo: `workers/python_worker_incomplete/`. Rust, C#, Go, Java, opcj. Node.js w osobnych katalogach. **Checklist integracji OTel / Pyroscope / HTTP:** [python-gateway-worker-integration.md](python-gateway-worker-integration.md).
 - Generator: `stub/sender/python_traffic_generator/`
 - Trasy: `stub/sender/python_traffic_generator/routes/`
 - Scenariusze: `stub/sender/python_traffic_generator/scenarios/`

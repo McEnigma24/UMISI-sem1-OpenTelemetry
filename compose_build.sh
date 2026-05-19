@@ -1,6 +1,8 @@
 #!/bin/bash
 set -euo pipefail
-# Uruchamiaj z katalogu UMISI-sem1-OpenTelemetry (tak jak compose_run).
+# Zawsze katalog z tym skryptem i ``docker-compose.yml`` (unikamy złego build context dla gateway/worker Python).
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR"
 
 clear
 echo "compose_build: Rust (Dockerfile builder + volumen /workspace)…"
@@ -24,6 +26,9 @@ clear
 # ( cd workers/nodejs && ./docker_build.sh )
 
 clear
+echo "compose_build: Docker Compose (m.in. gateway_python, worker_python, otel, … — równolegle)…"
+# Obrazy Python: osobne projekty — ``python_gateway/Dockerfile`` → ``gateway_python``,
+# ``workers/python_worker/Dockerfile`` → ``worker_python`` (oba context: katalog repo).
 docker compose build --parallel
 
 docker image prune -f

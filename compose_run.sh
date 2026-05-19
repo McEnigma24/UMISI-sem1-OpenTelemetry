@@ -1,4 +1,6 @@
 #!/bin/bash
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR"
 ./compose_build.sh || exit 1
 
 # docker compose up
@@ -8,7 +10,7 @@
 # docker compose build --no-cache worker-csharp
 
 docker compose up -d --force-recreate || exit 1
-docker compose logs -f gateway-python worker-rust worker-csharp worker-go worker-java
+docker compose logs -f gateway-python worker-python worker-rust worker-csharp worker-go worker-java
 # docker compose logs -f otel 2>&1 # 'forward' - 'received' - 'Body:'
 
 docker container prune -f

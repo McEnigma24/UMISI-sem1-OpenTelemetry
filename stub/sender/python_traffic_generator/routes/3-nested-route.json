@@ -1,7 +1,7 @@
 {
   "route": [
     {
-      "id": "py",
+      "id": "py-gateway",
       "visited": false,
       "processing_steps": [
         { "activity": "hop-work", "time": "0.5s" }
