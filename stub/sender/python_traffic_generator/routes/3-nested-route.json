@@ -16,7 +16,7 @@
           "nested_route": [
             { "id": "go", "visited": false, "processing_steps": [ { "activity": "nested-work", "time": "0.4s" } ] },
             { "id": "ja", "visited": false, "processing_steps": [ { "activity": "nested-work", "time": "1.6s" } ] },
-            { "id": "rs", "visited": false, "processing_steps": [ { "activity": "nested-work", "time": "1.1s" } ] },
+            { "id": "py-worker", "visited": false, "processing_steps": [ { "activity": "nested-work", "time": "1.1s" } ] },
             { "id": "go", "visited": false, "processing_steps": [ { "activity": "nested-work", "time": "0.72s" } ] }
           ]
         },

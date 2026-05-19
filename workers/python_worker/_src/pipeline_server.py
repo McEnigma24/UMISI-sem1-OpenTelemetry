@@ -267,8 +267,13 @@ def _forward_to_next(url: str, body: bytes) -> tuple[int, bytes]:
             f"00-{format_trace_id(current_sc.trace_id)}-"
             f"{format_span_id(current_sc.span_id)}-{flags}"
         )
-        # Nie polegamy wyłącznie na globalnym propagatorze: gateway musi wysłać parent
-        # dokładnie z aktualnego spana CLIENT (`pipeline.forward` / `pipeline.nested_forward`).
+        # WAŻNE: to rozwiązuje przypadek, w którym Jaeger pokazuje osobny trace
+        # `gateway_python` z długim `pipeline.forward` oraz osobny trace downstream
+        # (`worker_rust`/...). Sam forward działa, ale pierwszy hop nie ma wspólnego
+        # trace_id, bo propagator nie wysyła parenta z aktualnego spana CLIENT.
+        # Dlatego gateway nadpisuje `traceparent` bezpośrednio ze SpanContext
+        # aktywnego `pipeline.forward` / `pipeline.nested_forward`.
+        # Atrybut poniżej pozwala później porównać wysłany parent z trace_id downstream.
         carrier["traceparent"] = traceparent
         current_span.set_attribute("demo.forward.traceparent", traceparent)
     if not carrier.get("traceparent") and os.environ.get(
