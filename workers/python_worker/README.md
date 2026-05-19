@@ -43,6 +43,19 @@ Traffic generator wysyła JSON z listą `route`. Każdy worker:
 5. Oznacza swój segment jako odwiedzony.
 6. Forwarduje payload do następnego workera albo zwraca odpowiedź końcową.
 
+Payload może mieć root-level parametr `http_error_probability`, a każdy obiekt
+segmentu `route` może mieć własny lokalny override o tej samej nazwie. Worker
+po odebraniu requestu wybiera pierwszy nieodwiedzony segment i używa lokalnej
+wartości z tego segmentu, jeśli istnieje; w przeciwnym razie używa wartości
+globalnej z root payloadu. Brak pola albo `null` oznacza `0.0`.
+
+Wartość może być liczbą albo stringiem parsowalnym do liczby z zakresu
+`0.0..1.0`; wartość spoza zakresu zwraca `HTTP 400`. Każdy mikroserwis losuje
+niezależnie tuż po wyborze swojego segmentu, ale przed jakimkolwiek
+processingiem lub forwardem. Przy trafieniu zwraca `HTTP 500` z JSON-em
+`simulated_http_error`. Dla testu ustaw globalnie np. `0.25`, lokalnie przy
+konkretnym segmencie `1.0`, żeby wymusić błąd tylko w tym workerze.
+
 ```mermaid
 flowchart LR
     TrafficGenerator["Traffic Generator"] --> Gateway["gateway-python complete"]
@@ -98,6 +111,11 @@ spana CLIENT. Bez tego downstream dostaje request HTTP, ale zaczyna nowy trace.
 W gotowej wersji atrybut `demo.forward.traceparent` pomaga diagnozować ten
 problem.
 
+Przy symulowanym HTTP 500 gotowa wersja oznacza span `pipeline.hop` statusem
+error i atrybutami `demo.simulated_http_error=true` oraz
+`demo.http_error_probability=<wartość>`. W wersji incomplete przy tym miejscu
+jest hint, gdzie dodać status i atrybuty po uzupełnieniu OpenTelemetry.
+
 ### 3. Metrics
 
 Dodaj metryki:
@@ -147,6 +165,8 @@ uruchamiał profiler CPU z tagami `service.name`, `demo.worker_id` i
   granicy HTTP.
 - `worker-python` nie pojawia się w trace: sprawdź, czy route zawiera
   `py-worker` oraz czy peer map ma `DEMO_PEER_PY-WORKER`.
+- Losowe `HTTP 500`: sprawdź globalne i lokalne `http_error_probability` w
+  route payloadzie; lokalny parametr w segmencie ma pierwszeństwo przed globalnym.
 - Brak metryk: sprawdź `MeterProvider`, exporter i atrybuty punktów.
 - Brak logów: sprawdź `OTEL_DEMO_LOG_EXPORT`, `LoggerProvider` i endpoint
   `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`.

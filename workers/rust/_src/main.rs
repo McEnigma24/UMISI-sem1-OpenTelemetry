@@ -16,12 +16,13 @@ use axum::response::IntoResponse;
 use axum::response::Response;
 use axum::routing::post;
 use axum::Router;
-use opentelemetry::metrics::{Counter, Histogram};
 use opentelemetry::global::{self};
 use opentelemetry::logs::{AnyValue, LogRecord, Logger, LoggerProvider, Severity};
+use opentelemetry::metrics::{Counter, Histogram};
 use opentelemetry::trace::FutureExt;
 use opentelemetry::trace::Span;
 use opentelemetry::trace::SpanKind;
+use opentelemetry::trace::Status;
 use opentelemetry::trace::TraceContextExt;
 use opentelemetry::trace::Tracer;
 use opentelemetry::Context;
@@ -41,6 +42,7 @@ use opentelemetry_sdk::trace::SdkTracerProvider;
 use opentelemetry_sdk::Resource;
 use serde::Deserialize;
 use serde::Serialize;
+use serde_json::{json, Value};
 use sysinfo::{Pid, ProcessesToUpdate, System};
 use tokio::net::TcpListener;
 use uuid::Uuid;
@@ -67,6 +69,8 @@ struct RouteSeg {
     processing_time: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     processing_steps: Option<Vec<ProcessingStep>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    http_error_probability: Option<Value>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
@@ -77,6 +81,8 @@ struct PipelineMsg {
     counter: String,
     #[serde(rename = "table_of_workers")]
     table_of_workers: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    http_error_probability: Option<Value>,
 }
 
 impl Default for PipelineMsg {
@@ -86,6 +92,7 @@ impl Default for PipelineMsg {
             visit_log: vec![],
             counter: "0".to_string(),
             table_of_workers: vec![],
+            http_error_probability: None,
         }
     }
 }
@@ -231,7 +238,9 @@ fn init_otlp_logs() {
 }
 
 fn process_metrics_enabled() -> bool {
-    let v = env::var("DEMO_PROCESS_METRICS").unwrap_or_default().to_lowercase();
+    let v = env::var("DEMO_PROCESS_METRICS")
+        .unwrap_or_default()
+        .to_lowercase();
     !matches!(v.as_str(), "0" | "false" | "no" | "off")
 }
 
@@ -362,16 +371,34 @@ fn init_otel() -> SdkTracerProvider {
     }
 }
 
+fn peer_id_from_env_tail(tail: &str) -> Result<String, String> {
+    let t = tail.trim().to_lowercase();
+    if t == "py" {
+        return Err(
+            "DEMO_PEER_PY removed — use DEMO_PEER_PY_GATEWAY / DEMO_PEER_PY_WORKER (route ids py-gateway / py-worker)"
+                .into(),
+        );
+    }
+    if t.starts_with("py_") {
+        return Ok(t.replace('_', "-"));
+    }
+    Ok(t)
+}
+
 fn load_peer_map() -> Result<HashMap<String, String>, String> {
     if let Ok(raw) = env::var("DEMO_PEER_MAP") {
         let t = raw.trim();
         if !t.is_empty() {
             let v: HashMap<String, String> = serde_json::from_str(t).map_err(|e| e.to_string())?;
-            return Ok(v
-                .into_iter()
-                .map(|(k, v)| (k.to_lowercase(), v.trim().to_string()))
-                .filter(|(_, v)| !v.is_empty())
-                .collect());
+            let mut out = HashMap::new();
+            for (k, val) in v.into_iter() {
+                let kk = peer_id_from_env_tail(&k.to_lowercase())?;
+                let vv = val.trim().to_string();
+                if !kk.is_empty() && !vv.is_empty() {
+                    out.insert(kk, vv);
+                }
+            }
+            return Ok(out);
         }
     }
     let mut m = HashMap::new();
@@ -381,10 +408,10 @@ fn load_peer_map() -> Result<HashMap<String, String>, String> {
             continue;
         }
         if let Some(tail) = rest {
-            let tail = tail.trim().to_lowercase();
+            let key = peer_id_from_env_tail(&tail.trim().to_lowercase())?;
             let v = v.trim();
-            if !tail.is_empty() && !v.is_empty() {
-                m.insert(tail, v.to_string());
+            if !key.is_empty() && !v.is_empty() {
+                m.insert(key, v.to_string());
             }
         }
     }
@@ -417,12 +444,50 @@ fn parse_processing_time(s: &Option<String>, cap: f64) -> Result<f64, String> {
             .parse::<f64>()
             .map_err(|_| format!("invalid processing_time: {s}"))?
     } else {
-        return Err(format!("invalid processing_time: {s} (use e.g. 5.6s or 100ms)"));
+        return Err(format!(
+            "invalid processing_time: {s} (use e.g. 5.6s or 100ms)"
+        ));
     };
     if sec < 0.0 {
         return Err("processing_time must be non-negative".to_string());
     }
     Ok(sec.min(cap))
+}
+
+fn parse_http_error_probability(raw: Option<&Value>) -> Result<f64, String> {
+    let Some(v) = raw else {
+        return Ok(0.0);
+    };
+    let p = if v.is_null() {
+        0.0
+    } else if let Some(n) = v.as_f64() {
+        n
+    } else if let Some(s) = v.as_str() {
+        let t = s.trim();
+        if t.is_empty() {
+            0.0
+        } else {
+            t.parse::<f64>().map_err(|_| {
+                "http_error_probability must be a number between 0.0 and 1.0".to_string()
+            })?
+        }
+    } else {
+        return Err("http_error_probability must be a number between 0.0 and 1.0".to_string());
+    };
+    if !(0.0..=1.0).contains(&p) {
+        return Err("http_error_probability must be between 0.0 and 1.0".to_string());
+    }
+    Ok(p)
+}
+
+fn effective_http_error_probability(
+    global: Option<&Value>,
+    seg_local: Option<&Value>,
+) -> Result<f64, String> {
+    if seg_local.is_some() {
+        return parse_http_error_probability(seg_local);
+    }
+    parse_http_error_probability(global)
 }
 
 enum ParsedStep {
@@ -453,15 +518,14 @@ fn parse_processing_steps(seg: &RouteSeg, cap: f64) -> Result<Option<Vec<ParsedS
                 ));
             }
             let fid = nr[0].id.trim().to_lowercase();
-            if fid == "py" {
+            if fid == "py" || fid == "py-gateway" {
                 return Err(format!(
-                    "processing_steps[{i}].nested_route[0].id must not be 'py' (workers only)"
+                    "processing_steps[{i}].nested_route[0].id must not be {fid:?} (workers only)"
                 ));
             }
             for (j, sub) in nr.iter().enumerate() {
-                route_segment_schema(sub).map_err(|e| {
-                    format!("processing_steps[{i}].nested_route[{j}]: {e}")
-                })?;
+                route_segment_schema(sub)
+                    .map_err(|e| format!("processing_steps[{i}].nested_route[{j}]: {e}"))?;
             }
             let pre_sec = parse_processing_time(&Some(st.time.clone()), cap)?;
             let act = {
@@ -521,9 +585,8 @@ fn span_name_for_activity(act: &str) -> String {
 
 fn work_plan_for_segment(seg: &RouteSeg, cap: f64) -> Result<Vec<ParsedStep>, String> {
     route_segment_schema(seg)?;
-    parse_processing_steps(seg, cap)?.ok_or_else(|| {
-        "non-empty 'processing_steps' is required".to_string()
-    })
+    parse_processing_steps(seg, cap)?
+        .ok_or_else(|| "non-empty 'processing_steps' is required".to_string())
 }
 
 fn first_unvisited(route: &[RouteSeg]) -> Option<usize> {
@@ -538,12 +601,10 @@ fn bump(m: &mut PipelineMsg, cid: &str) {
 
 fn peer_url<'a>(peers: &'a HashMap<String, String>, id: &str) -> Option<&'a String> {
     let k = id.trim();
-    peers
-        .get(&k.to_lowercase())
-        .or_else(|| peers.get(k))
+    peers.get(&k.to_lowercase()).or_else(|| peers.get(k))
 }
 
-fn nested_pipeline_msg(route: &[RouteSeg]) -> PipelineMsg {
+fn nested_pipeline_msg(route: &[RouteSeg], http_error_probability: Option<Value>) -> PipelineMsg {
     let mut r: Vec<RouteSeg> = route.to_vec();
     for s in &mut r {
         s.visited = false;
@@ -553,12 +614,14 @@ fn nested_pipeline_msg(route: &[RouteSeg]) -> PipelineMsg {
         visit_log: vec![],
         counter: "0".to_string(),
         table_of_workers: vec![],
+        http_error_probability,
     }
 }
 
 async fn post_nested_subpipeline<T>(
     st: &St,
     nested_route: &[RouteSeg],
+    http_error_probability: Option<Value>,
     t: &T,
     step_cx: &Context,
 ) -> Result<(), String>
@@ -570,7 +633,7 @@ where
     let url = peer_url(&st.peers, first_id)
         .ok_or_else(|| format!("no peer URL for nested id {first_id:?}"))?
         .clone();
-    let body_vec = serde_json::to_vec(&nested_pipeline_msg(nested_route))
+    let body_vec = serde_json::to_vec(&nested_pipeline_msg(nested_route, http_error_probability))
         .map_err(|e| e.to_string())?;
     rs_line(&format!(
         "[{}] nested_forward to {url}: {}",
@@ -596,9 +659,9 @@ where
         let resp = rb.send().await.map_err(|e| e.to_string())?;
         let c = resp.status();
         let _txt = resp.text().await.map_err(|e| e.to_string())?;
-        Ok::<http::StatusCode, String>(http::StatusCode::from_u16(c.as_u16()).unwrap_or(
-            http::StatusCode::BAD_GATEWAY,
-        ))
+        Ok::<http::StatusCode, String>(
+            http::StatusCode::from_u16(c.as_u16()).unwrap_or(http::StatusCode::BAD_GATEWAY),
+        )
     }
     .with_context(forward_cx);
     let status = match resp_fut.await {
@@ -670,16 +733,46 @@ async fn route_mode(st: &St, parent: &Context, mut m: PipelineMsg) -> Response {
         )
             .into_response();
     }
-    let steps = match work_plan_for_segment(&m.route[idx], st.max_proc) {
+    let http_error_probability = match effective_http_error_probability(
+        m.http_error_probability.as_ref(),
+        m.route[idx].http_error_probability.as_ref(),
+    ) {
         Ok(p) => p,
         Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
     };
 
-    let hop = t
+    let mut hop = t
         .span_builder("pipeline.hop")
         .with_kind(SpanKind::Server)
         .start_with_context(&t, parent);
+    hop.set_attribute(KeyValue::new("demo.worker_id", st.id.clone()));
+    if http_error_probability > 0.0 && rand::random::<f64>() < http_error_probability {
+        hop.set_attribute(KeyValue::new("demo.simulated_http_error", true));
+        hop.set_attribute(KeyValue::new(
+            "demo.http_error_probability",
+            http_error_probability,
+        ));
+        hop.set_status(Status::error("simulated_http_error"));
+        let body = json!({
+            "error": "simulated_http_error",
+            "worker_id": st.id,
+            "probability": http_error_probability
+        })
+        .to_string();
+        return Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap_or_else(|e| {
+                (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
+            });
+    }
     let hop_cx = parent.clone().with_span(hop);
+
+    let steps = match work_plan_for_segment(&m.route[idx], st.max_proc) {
+        Ok(p) => p,
+        Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
+    };
 
     {
         let cpu_sum: f64 = steps
@@ -689,15 +782,10 @@ async fn route_mode(st: &St, parent: &Context, mut m: PipelineMsg) -> Response {
                 ParsedStep::Nested { pre_sec, .. } => *pre_sec,
             })
             .sum();
-        let has_nested = steps
-            .iter()
-            .any(|s| matches!(s, ParsedStep::Nested { .. }));
+        let has_nested = steps.iter().any(|s| matches!(s, ParsedStep::Nested { .. }));
         let mut proc = t.start_with_context("pipeline.processing", &hop_cx);
         proc.set_attribute(KeyValue::new("demo.processing.mode", "steps"));
-        proc.set_attribute(KeyValue::new(
-            "demo.step_count",
-            steps.len() as i64,
-        ));
+        proc.set_attribute(KeyValue::new("demo.step_count", steps.len() as i64));
         proc.set_attribute(KeyValue::new("demo.simulated_processing_sec", cpu_sum));
         proc.set_attribute(KeyValue::new("demo.has_nested_steps", has_nested));
         let proc_cx = hop_cx.clone().with_span(proc);
@@ -738,8 +826,14 @@ async fn route_mode(st: &St, parent: &Context, mut m: PipelineMsg) -> Response {
                             .with_context(step_cx.clone())
                             .await;
                     }
-                    if let Err(e) =
-                        post_nested_subpipeline(st, route.as_slice(), &t, &step_cx).await
+                    if let Err(e) = post_nested_subpipeline(
+                        st,
+                        route.as_slice(),
+                        m.http_error_probability.clone(),
+                        &t,
+                        &step_cx,
+                    )
+                    .await
                     {
                         return (StatusCode::BAD_GATEWAY, e).into_response();
                     }
@@ -812,7 +906,9 @@ async fn route_mode(st: &St, parent: &Context, mut m: PipelineMsg) -> Response {
                 .status(status)
                 .header("content-type", "application/json")
                 .body(Body::from(out))
-                .unwrap_or_else(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response());
+                .unwrap_or_else(|e| {
+                    (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
+                });
         }
 
         let out = match serde_json::to_string(&m) {
@@ -821,10 +917,7 @@ async fn route_mode(st: &St, parent: &Context, mut m: PipelineMsg) -> Response {
                 return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
             }
         };
-        rs_line(&format!(
-            "[{}] respond (terminal route): {out}",
-            st.id
-        ));
+        rs_line(&format!("[{}] respond (terminal route): {out}", st.id));
         st.msg_counter.add(1, &pipeline_point_kv(st.id.as_str()));
         Response::builder()
             .status(StatusCode::OK)
@@ -881,9 +974,7 @@ fn maybe_start_pyroscope_push() {
                 return;
             }
         };
-        eprintln!(
-            "Pyroscope push profiler: server='{server}' application_name='{app_name}'"
-        );
+        eprintln!("Pyroscope push profiler: server='{server}' application_name='{app_name}'");
         thread::park();
     });
 }
@@ -955,8 +1046,6 @@ async fn main() {
         st.path,
         st.peers.keys().collect::<Vec<_>>()
     ));
-    axum::serve(l, app)
-        .await
-        .expect("serve");
+    axum::serve(l, app).await.expect("serve");
     let _ = keep.shutdown();
 }

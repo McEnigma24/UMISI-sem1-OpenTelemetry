@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import re
 import sys
 import time
@@ -33,6 +34,10 @@ class _LabSpan:
         return
 
     def record_exception(self, _exc: BaseException) -> None:
+        return
+
+    def set_status(self, _status: Any) -> None:
+        # LAB TODO: set the span status to ERROR when reporting simulated HTTP 500.
         return
 
 
@@ -157,6 +162,36 @@ def _parse_processing_time(v: Any) -> float:
     return sec
 
 
+def _parse_http_error_probability(v: Any) -> float:
+    if v is None:
+        return 0.0
+    if isinstance(v, bool):
+        raise ValueError("http_error_probability must be a number between 0.0 and 1.0")
+    if isinstance(v, (int, float)):
+        p = float(v)
+    elif isinstance(v, str):
+        s = v.strip()
+        if not s:
+            return 0.0
+        try:
+            p = float(s)
+        except ValueError as e:
+            raise ValueError(
+                "http_error_probability must be a number between 0.0 and 1.0"
+            ) from e
+    else:
+        raise ValueError("http_error_probability must be a number between 0.0 and 1.0")
+    if p < 0.0 or p > 1.0:
+        raise ValueError("http_error_probability must be between 0.0 and 1.0")
+    return p
+
+
+def _effective_http_error_probability(data: dict[str, Any], seg: dict[str, Any]) -> float:
+    if "http_error_probability" in seg:
+        return _parse_http_error_probability(seg.get("http_error_probability"))
+    return _parse_http_error_probability(data.get("http_error_probability"))
+
+
 def _span_name_for_activity(activity: str, index: int) -> str:
     a = (activity or "").strip()
     if not a:
@@ -221,7 +256,9 @@ def _validate_nested_route_segments(raw: list[Any], step_i: int) -> tuple[dict[s
     return tuple(out)
 
 
-def _nested_pipeline_payload(nested_route: tuple[dict[str, Any], ...]) -> dict[str, Any]:
+def _nested_pipeline_payload(
+    nested_route: tuple[dict[str, Any], ...], root_http_error_probability: Any
+) -> dict[str, Any]:
     nr: list[dict[str, Any]] = []
     for s in nested_route:
         s2 = dict(s)
@@ -232,6 +269,7 @@ def _nested_pipeline_payload(nested_route: tuple[dict[str, Any], ...]) -> dict[s
         "visit_log": [],
         "counter": "0",
         "table_of_workers": [],
+        "http_error_probability": _parse_http_error_probability(root_http_error_probability),
     }
 
 
@@ -321,6 +359,14 @@ def _make_handler(
         def log_message(self, _format: str, *_args) -> None:
             return
 
+        def _send_json(self, status_code: int, payload: dict[str, Any]) -> None:
+            body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            self.send_response(status_code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         def do_POST(self) -> None:  # noqa: N802
             t0 = time.perf_counter()
             if self.path != path and self.path.rstrip("/") != path.rstrip("/"):
@@ -347,7 +393,15 @@ def _make_handler(
                 use_route = isinstance(route, list) and len(route) > 0
 
                 if use_route:
-                    self._handle_route(data, worker_id, peer_map, tr, msg_counter, hop_hist, t0)
+                    self._handle_route(
+                        data,
+                        worker_id,
+                        peer_map,
+                        tr,
+                        msg_counter,
+                        hop_hist,
+                        t0,
+                    )
                 else:
                     self.send_error(
                         400,
@@ -398,6 +452,32 @@ def _make_handler(
                     "first unvisited route segment id must match this node "
                     f"(expected {worker_id!r}, got {seg_id!r})",
                 )
+                return
+            try:
+                http_error_probability = _effective_http_error_probability(data, seg)
+            except ValueError as e:
+                self.send_error(400, str(e))
+                return
+            if http_error_probability > 0.0 and random.random() < http_error_probability:
+                with tr.start_as_current_span(
+                    "pipeline.hop",
+                    kind="SERVER",
+                    attributes={
+                        "demo.worker_id": worker_id,
+                        "demo.simulated_http_error": True,
+                        "demo.http_error_probability": http_error_probability,
+                    },
+                ) as span:
+                    # LAB TODO: after implementing real OTel, mark this SERVER span as ERROR
+                    # and keep these attributes so simulated failures are visible in Jaeger.
+                    self._send_json(
+                        500,
+                        {
+                            "error": "simulated_http_error",
+                            "worker_id": worker_id,
+                            "probability": http_error_probability,
+                        },
+                    )
                 return
             sch = _segment_schema_error_or_none(seg, "route segment")
             if sch:
@@ -482,7 +562,9 @@ def _make_handler(
                                         f"no peer URL for nested id {first_id!r}",
                                     )
                                     return
-                                nest_payload = _nested_pipeline_payload(st.nested_route)
+                                nest_payload = _nested_pipeline_payload(
+                                    st.nested_route, data.get("http_error_probability")
+                                )
                                 nest_bytes = json.dumps(
                                     nest_payload, ensure_ascii=False
                                 ).encode("utf-8")

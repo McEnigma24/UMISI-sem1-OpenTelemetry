@@ -3,6 +3,7 @@
     {
       "id": "py-gateway",
       "visited": false,
+      "http_error_probability": 0.0,
       "processing_steps": [
         { "activity": "hop-work", "time": "0.5s" }
       ]
@@ -10,14 +11,15 @@
     {
       "id": "rs",
       "visited": false,
+      "http_error_probability": 0.0,
       "processing_steps": [
         { "activity": "before-nested", "time": "0.7s" },
         { "activity": "nested-worker-chain",
           "nested_route": [
-            { "id": "go", "visited": false, "processing_steps": [ { "activity": "nested-work", "time": "0.4s" } ] },
-            { "id": "ja", "visited": false, "processing_steps": [ { "activity": "nested-work", "time": "1.6s" } ] },
-            { "id": "py-worker", "visited": false, "processing_steps": [ { "activity": "nested-work", "time": "1.1s" } ] },
-            { "id": "go", "visited": false, "processing_steps": [ { "activity": "nested-work", "time": "0.72s" } ] }
+            { "id": "go", "visited": false, "http_error_probability": 0.0, "processing_steps": [ { "activity": "nested-work", "time": "0.4s" } ] },
+            { "id": "ja", "visited": false, "http_error_probability": 0.0, "processing_steps": [ { "activity": "nested-work", "time": "1.6s" } ] },
+            { "id": "py-worker", "visited": false, "http_error_probability": 0.0, "processing_steps": [ { "activity": "nested-work", "time": "1.1s" } ] },
+            { "id": "go", "visited": false, "http_error_probability": 0.0, "processing_steps": [ { "activity": "nested-work", "time": "0.72s" } ] }
           ]
         },
         { "activity": "after-nested", "time": "0.5s" }
@@ -26,6 +28,7 @@
     {
       "id": "cs",
       "visited": false,
+      "http_error_probability": 0.0,
       "processing_steps": [
         { "activity": "hop-work", "time": "0.9s" }
       ]
@@ -33,5 +36,6 @@
   ],
   "visit_log": [],
   "counter": "0",
-  "table_of_workers": []
+  "table_of_workers": [],
+  "http_error_probability": 0.0
 }
