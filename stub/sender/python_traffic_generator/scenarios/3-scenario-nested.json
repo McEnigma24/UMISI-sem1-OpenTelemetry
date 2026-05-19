@@ -7,6 +7,26 @@
     {
       "name": "sequential_rotating",
       "initial_delay_sec": 5,
+      "periodicity": 12,
+      "repetitions": "inf",
+      "send": {
+        "mode": "sequential",
+        "payload_files": ["1-route.json"]
+      }
+    },
+    {
+      "name": "sequential_rotating",
+      "initial_delay_sec": 5,
+      "periodicity": 12,
+      "repetitions": "inf",
+      "send": {
+        "mode": "sequential",
+        "payload_files": ["2-slow-route.json"]
+      }
+    },
+    {
+      "name": "sequential_rotating",
+      "initial_delay_sec": 5,
       "periodicity": 10,
       "repetitions": "inf",
       "send": {
