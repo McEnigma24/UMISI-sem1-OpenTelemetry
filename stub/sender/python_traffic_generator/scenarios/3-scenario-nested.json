@@ -7,17 +7,17 @@
     {
       "name": "sequential_rotating",
       "initial_delay_sec": 5,
-      "periodicity": 12,
+      "periodicity": 3,
       "repetitions": "inf",
       "send": {
         "mode": "sequential",
-        "payload_files": ["1-route.json"]
+        "payload_files": ["1-route-error.json"]
       }
     },
     {
       "name": "sequential_rotating",
       "initial_delay_sec": 5,
-      "periodicity": 12,
+      "periodicity": 6,
       "repetitions": "inf",
       "send": {
         "mode": "sequential",
@@ -27,7 +27,7 @@
     {
       "name": "sequential_rotating",
       "initial_delay_sec": 5,
-      "periodicity": 10,
+      "periodicity": 5,
       "repetitions": "inf",
       "send": {
         "mode": "sequential",
