@@ -11,7 +11,7 @@
       "repetitions": "inf",
       "send": {
         "mode": "sequential",
-        "payload_files": ["1-route-error.json"]
+        "payload_files": ["1-route.json"]
       }
     },
     {

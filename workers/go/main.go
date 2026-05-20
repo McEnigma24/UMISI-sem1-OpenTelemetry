@@ -9,7 +9,6 @@ import (
 	"io"
 	"log"
 	"math"
-	"math/rand"
 	"net"
 	"net/http"
 	"net/url"
@@ -70,19 +69,17 @@ type processingStep struct {
 }
 
 type routeSegment struct {
-	ID                   string           `json:"id"`
-	Visited              bool             `json:"visited"`
-	ProcessingTime       *json.RawMessage `json:"processing_time,omitempty"`
-	ProcessingSteps      []processingStep `json:"processing_steps"`
-	HTTPErrorProbability json.RawMessage  `json:"http_error_probability,omitempty"`
+	ID              string           `json:"id"`
+	Visited         bool             `json:"visited"`
+	ProcessingTime  *json.RawMessage `json:"processing_time,omitempty"`
+	ProcessingSteps []processingStep `json:"processing_steps"`
 }
 
 type pipelineMsg struct {
-	Route                []routeSegment  `json:"route"`
-	VisitLog             []string        `json:"visit_log"`
-	Counter              string          `json:"counter"`
-	TableOfWorkers       []string        `json:"table_of_workers"`
-	HTTPErrorProbability json.RawMessage `json:"http_error_probability,omitempty"`
+	Route          []routeSegment `json:"route"`
+	VisitLog       []string       `json:"visit_log"`
+	Counter        string         `json:"counter"`
+	TableOfWorkers []string       `json:"table_of_workers"`
 }
 
 // --- Parsed steps ---
@@ -390,42 +387,6 @@ func parseProcessingTime(s string, capSec float64) (float64, error) {
 	return sec, nil
 }
 
-func parseHTTPErrorProbability(raw json.RawMessage) (float64, error) {
-	if len(raw) == 0 || string(raw) == "null" {
-		return 0, nil
-	}
-	var n float64
-	if err := json.Unmarshal(raw, &n); err == nil {
-		if n < 0 || n > 1 {
-			return 0, fmt.Errorf("http_error_probability must be between 0.0 and 1.0")
-		}
-		return n, nil
-	}
-	var s string
-	if err := json.Unmarshal(raw, &s); err == nil {
-		s = strings.TrimSpace(s)
-		if s == "" {
-			return 0, nil
-		}
-		v, err := strconv.ParseFloat(s, 64)
-		if err != nil {
-			return 0, fmt.Errorf("http_error_probability must be a number between 0.0 and 1.0")
-		}
-		if v < 0 || v > 1 {
-			return 0, fmt.Errorf("http_error_probability must be between 0.0 and 1.0")
-		}
-		return v, nil
-	}
-	return 0, fmt.Errorf("http_error_probability must be a number between 0.0 and 1.0")
-}
-
-func effectiveHTTPErrorProbability(global json.RawMessage, seg *routeSegment) (float64, error) {
-	if seg != nil && len(seg.HTTPErrorProbability) > 0 {
-		return parseHTTPErrorProbability(seg.HTTPErrorProbability)
-	}
-	return parseHTTPErrorProbability(global)
-}
-
 func segmentSchemaErr(seg *routeSegment, where string) string {
 	if seg.ProcessingTime != nil {
 		return where + ": field 'processing_time' is not supported; use non-empty 'processing_steps' with {\"activity\",\"time\"}"
@@ -525,7 +486,7 @@ func bumpCounterTable(m *pipelineMsg, workerID string) {
 	m.TableOfWorkers = append(m.TableOfWorkers, workerID)
 }
 
-func nestedPipelineMsg(nr []routeSegment, httpErrorProbability json.RawMessage) pipelineMsg {
+func nestedPipelineMsg(nr []routeSegment) pipelineMsg {
 	cp := make([]routeSegment, len(nr))
 	copy(cp, nr)
 	for i := range cp {
@@ -536,7 +497,6 @@ func nestedPipelineMsg(nr []routeSegment, httpErrorProbability json.RawMessage) 
 		VisitLog:       []string{},
 		Counter:        "0",
 		TableOfWorkers: []string{},
-		HTTPErrorProbability: httpErrorProbability,
 	}
 }
 
@@ -723,27 +683,6 @@ func (st *appState) handlePipeline(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("first unvisited route segment id must match this node (expected %q, got %q)", st.workerID, seg.ID), http.StatusBadRequest)
 		return
 	}
-	httpErrorProbability, err := effectiveHTTPErrorProbability(msg.HTTPErrorProbability, seg)
-	if err != nil {
-		hopSpan.SetStatus(codes.Error, err.Error())
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	if httpErrorProbability > 0 && rand.Float64() < httpErrorProbability {
-		hopSpan.SetAttributes(
-			attribute.Bool("demo.simulated_http_error", true),
-			attribute.Float64("demo.http_error_probability", httpErrorProbability),
-		)
-		hopSpan.SetStatus(codes.Error, "simulated_http_error")
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"error":       "simulated_http_error",
-			"worker_id":   st.workerID,
-			"probability": httpErrorProbability,
-		})
-		return
-	}
 	if sch := segmentSchemaErr(seg, "route segment"); sch != "" {
 		hopSpan.SetStatus(codes.Error, sch)
 		http.Error(w, sch, http.StatusBadRequest)
@@ -815,7 +754,7 @@ func (st *appState) handlePipeline(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, fmt.Sprintf("no peer URL for nested id %q", firstID), http.StatusBadGateway)
 				return
 			}
-			nestBody, _ := json.Marshal(nestedPipelineMsg(step.nestedRoute, msg.HTTPErrorProbability))
+			nestBody, _ := json.Marshal(nestedPipelineMsg(step.nestedRoute))
 			st.goLine(fmt.Sprintf("[%s] nested_forward to %s: %s", st.workerID, nurl, string(nestBody)))
 
 			nfCtx, nfSpan := tr.Start(stepCtx, "pipeline.nested_forward",

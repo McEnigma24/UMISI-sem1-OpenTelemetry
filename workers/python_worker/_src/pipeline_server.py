@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 import os
-import random
 import re
 import sys
 import time
@@ -21,7 +20,7 @@ from urllib import request as urlrequest
 from opentelemetry import context as otel_context
 from opentelemetry import trace
 from opentelemetry.propagate import extract, inject
-from opentelemetry.trace import Status, StatusCode, format_span_id, format_trace_id
+from opentelemetry.trace import format_span_id, format_trace_id
 
 import telemetry
 
@@ -121,36 +120,6 @@ def _parse_processing_time(v: Any) -> float:
     return sec
 
 
-def _parse_http_error_probability(v: Any) -> float:
-    if v is None:
-        return 0.0
-    if isinstance(v, bool):
-        raise ValueError("http_error_probability must be a number between 0.0 and 1.0")
-    if isinstance(v, (int, float)):
-        p = float(v)
-    elif isinstance(v, str):
-        s = v.strip()
-        if not s:
-            return 0.0
-        try:
-            p = float(s)
-        except ValueError as e:
-            raise ValueError(
-                "http_error_probability must be a number between 0.0 and 1.0"
-            ) from e
-    else:
-        raise ValueError("http_error_probability must be a number between 0.0 and 1.0")
-    if p < 0.0 or p > 1.0:
-        raise ValueError("http_error_probability must be between 0.0 and 1.0")
-    return p
-
-
-def _effective_http_error_probability(data: dict[str, Any], seg: dict[str, Any]) -> float:
-    if "http_error_probability" in seg:
-        return _parse_http_error_probability(seg.get("http_error_probability"))
-    return _parse_http_error_probability(data.get("http_error_probability"))
-
-
 def _span_name_for_activity(activity: str, index: int) -> str:
     a = (activity or "").strip()
     if not a:
@@ -215,9 +184,7 @@ def _validate_nested_route_segments(raw: list[Any], step_i: int) -> tuple[dict[s
     return tuple(out)
 
 
-def _nested_pipeline_payload(
-    nested_route: tuple[dict[str, Any], ...], root_http_error_probability: Any
-) -> dict[str, Any]:
+def _nested_pipeline_payload(nested_route: tuple[dict[str, Any], ...]) -> dict[str, Any]:
     nr: list[dict[str, Any]] = []
     for s in nested_route:
         s2 = dict(s)
@@ -228,7 +195,6 @@ def _nested_pipeline_payload(
         "visit_log": [],
         "counter": "0",
         "table_of_workers": [],
-        "http_error_probability": _parse_http_error_probability(root_http_error_probability),
     }
 
 
@@ -452,31 +418,6 @@ def _make_handler(
                     f"(expected {worker_id!r}, got {seg_id!r})",
                 )
                 return
-            try:
-                http_error_probability = _effective_http_error_probability(data, seg)
-            except ValueError as e:
-                self.send_error(400, str(e))
-                return
-            if http_error_probability > 0.0 and random.random() < http_error_probability:
-                with tr.start_as_current_span(
-                    "pipeline.hop",
-                    kind=trace.SpanKind.SERVER,
-                    attributes={
-                        "demo.worker_id": worker_id,
-                        "demo.simulated_http_error": True,
-                        "demo.http_error_probability": http_error_probability,
-                    },
-                ) as span:
-                    span.set_status(Status(StatusCode.ERROR, "simulated_http_error"))
-                    self._send_json(
-                        500,
-                        {
-                            "error": "simulated_http_error",
-                            "worker_id": worker_id,
-                            "probability": http_error_probability,
-                        },
-                    )
-                return
             sch = _segment_schema_error_or_none(seg, "route segment")
             if sch:
                 self.send_error(400, sch)
@@ -560,9 +501,7 @@ def _make_handler(
                                         f"no peer URL for nested id {first_id!r}",
                                     )
                                     return
-                                nest_payload = _nested_pipeline_payload(
-                                    st.nested_route, data.get("http_error_probability")
-                                )
+                                nest_payload = _nested_pipeline_payload(st.nested_route)
                                 nest_bytes = json.dumps(
                                     nest_payload, ensure_ascii=False
                                 ).encode("utf-8")

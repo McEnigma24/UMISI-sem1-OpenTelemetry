@@ -22,7 +22,6 @@ use opentelemetry::metrics::{Counter, Histogram};
 use opentelemetry::trace::FutureExt;
 use opentelemetry::trace::Span;
 use opentelemetry::trace::SpanKind;
-use opentelemetry::trace::Status;
 use opentelemetry::trace::TraceContextExt;
 use opentelemetry::trace::Tracer;
 use opentelemetry::Context;
@@ -42,7 +41,6 @@ use opentelemetry_sdk::trace::SdkTracerProvider;
 use opentelemetry_sdk::Resource;
 use serde::Deserialize;
 use serde::Serialize;
-use serde_json::{json, Value};
 use sysinfo::{Pid, ProcessesToUpdate, System};
 use tokio::net::TcpListener;
 use uuid::Uuid;
@@ -69,8 +67,6 @@ struct RouteSeg {
     processing_time: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     processing_steps: Option<Vec<ProcessingStep>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    http_error_probability: Option<Value>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
@@ -81,8 +77,6 @@ struct PipelineMsg {
     counter: String,
     #[serde(rename = "table_of_workers")]
     table_of_workers: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    http_error_probability: Option<Value>,
 }
 
 impl Default for PipelineMsg {
@@ -92,7 +86,6 @@ impl Default for PipelineMsg {
             visit_log: vec![],
             counter: "0".to_string(),
             table_of_workers: vec![],
-            http_error_probability: None,
         }
     }
 }
@@ -454,42 +447,6 @@ fn parse_processing_time(s: &Option<String>, cap: f64) -> Result<f64, String> {
     Ok(sec.min(cap))
 }
 
-fn parse_http_error_probability(raw: Option<&Value>) -> Result<f64, String> {
-    let Some(v) = raw else {
-        return Ok(0.0);
-    };
-    let p = if v.is_null() {
-        0.0
-    } else if let Some(n) = v.as_f64() {
-        n
-    } else if let Some(s) = v.as_str() {
-        let t = s.trim();
-        if t.is_empty() {
-            0.0
-        } else {
-            t.parse::<f64>().map_err(|_| {
-                "http_error_probability must be a number between 0.0 and 1.0".to_string()
-            })?
-        }
-    } else {
-        return Err("http_error_probability must be a number between 0.0 and 1.0".to_string());
-    };
-    if !(0.0..=1.0).contains(&p) {
-        return Err("http_error_probability must be between 0.0 and 1.0".to_string());
-    }
-    Ok(p)
-}
-
-fn effective_http_error_probability(
-    global: Option<&Value>,
-    seg_local: Option<&Value>,
-) -> Result<f64, String> {
-    if seg_local.is_some() {
-        return parse_http_error_probability(seg_local);
-    }
-    parse_http_error_probability(global)
-}
-
 enum ParsedStep {
     Cpu {
         activity: String,
@@ -604,7 +561,7 @@ fn peer_url<'a>(peers: &'a HashMap<String, String>, id: &str) -> Option<&'a Stri
     peers.get(&k.to_lowercase()).or_else(|| peers.get(k))
 }
 
-fn nested_pipeline_msg(route: &[RouteSeg], http_error_probability: Option<Value>) -> PipelineMsg {
+fn nested_pipeline_msg(route: &[RouteSeg]) -> PipelineMsg {
     let mut r: Vec<RouteSeg> = route.to_vec();
     for s in &mut r {
         s.visited = false;
@@ -614,14 +571,12 @@ fn nested_pipeline_msg(route: &[RouteSeg], http_error_probability: Option<Value>
         visit_log: vec![],
         counter: "0".to_string(),
         table_of_workers: vec![],
-        http_error_probability,
     }
 }
 
 async fn post_nested_subpipeline<T>(
     st: &St,
     nested_route: &[RouteSeg],
-    http_error_probability: Option<Value>,
     t: &T,
     step_cx: &Context,
 ) -> Result<(), String>
@@ -633,7 +588,7 @@ where
     let url = peer_url(&st.peers, first_id)
         .ok_or_else(|| format!("no peer URL for nested id {first_id:?}"))?
         .clone();
-    let body_vec = serde_json::to_vec(&nested_pipeline_msg(nested_route, http_error_probability))
+    let body_vec = serde_json::to_vec(&nested_pipeline_msg(nested_route))
         .map_err(|e| e.to_string())?;
     rs_line(&format!(
         "[{}] nested_forward to {url}: {}",
@@ -733,40 +688,11 @@ async fn route_mode(st: &St, parent: &Context, mut m: PipelineMsg) -> Response {
         )
             .into_response();
     }
-    let http_error_probability = match effective_http_error_probability(
-        m.http_error_probability.as_ref(),
-        m.route[idx].http_error_probability.as_ref(),
-    ) {
-        Ok(p) => p,
-        Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
-    };
-
     let mut hop = t
         .span_builder("pipeline.hop")
         .with_kind(SpanKind::Server)
         .start_with_context(&t, parent);
     hop.set_attribute(KeyValue::new("demo.worker_id", st.id.clone()));
-    if http_error_probability > 0.0 && rand::random::<f64>() < http_error_probability {
-        hop.set_attribute(KeyValue::new("demo.simulated_http_error", true));
-        hop.set_attribute(KeyValue::new(
-            "demo.http_error_probability",
-            http_error_probability,
-        ));
-        hop.set_status(Status::error("simulated_http_error"));
-        let body = json!({
-            "error": "simulated_http_error",
-            "worker_id": st.id,
-            "probability": http_error_probability
-        })
-        .to_string();
-        return Response::builder()
-            .status(StatusCode::INTERNAL_SERVER_ERROR)
-            .header("content-type", "application/json")
-            .body(Body::from(body))
-            .unwrap_or_else(|e| {
-                (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
-            });
-    }
     let hop_cx = parent.clone().with_span(hop);
 
     let steps = match work_plan_for_segment(&m.route[idx], st.max_proc) {
@@ -826,14 +752,8 @@ async fn route_mode(st: &St, parent: &Context, mut m: PipelineMsg) -> Response {
                             .with_context(step_cx.clone())
                             .await;
                     }
-                    if let Err(e) = post_nested_subpipeline(
-                        st,
-                        route.as_slice(),
-                        m.http_error_probability.clone(),
-                        &t,
-                        &step_cx,
-                    )
-                    .await
+                    if let Err(e) =
+                        post_nested_subpipeline(st, route.as_slice(), &t, &step_cx).await
                     {
                         return (StatusCode::BAD_GATEWAY, e).into_response();
                     }

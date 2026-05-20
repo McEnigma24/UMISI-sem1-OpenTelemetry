@@ -54,7 +54,6 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
-import java.util.concurrent.ThreadLocalRandom;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -428,39 +427,6 @@ public final class Main {
     throw new IllegalArgumentException("invalid processing time: " + s);
   }
 
-  private static double parseHttpErrorProbability(JsonElement probabilityEl) {
-    if (probabilityEl == null || probabilityEl.isJsonNull()) {
-      return 0.0;
-    }
-    double p;
-    if (probabilityEl.isJsonPrimitive() && probabilityEl.getAsJsonPrimitive().isNumber()) {
-      p = probabilityEl.getAsDouble();
-    } else if (probabilityEl.isJsonPrimitive() && probabilityEl.getAsJsonPrimitive().isString()) {
-      String s = probabilityEl.getAsString().trim();
-      if (s.isEmpty()) {
-        return 0.0;
-      }
-      try {
-        p = Double.parseDouble(s);
-      } catch (NumberFormatException e) {
-        throw new IllegalArgumentException("http_error_probability must be a number between 0.0 and 1.0");
-      }
-    } else {
-      throw new IllegalArgumentException("http_error_probability must be a number between 0.0 and 1.0");
-    }
-    if (p < 0.0 || p > 1.0) {
-      throw new IllegalArgumentException("http_error_probability must be between 0.0 and 1.0");
-    }
-    return p;
-  }
-
-  private static double effectiveHttpErrorProbability(JsonObject msg, JsonObject seg) {
-    if (seg.has("http_error_probability")) {
-      return parseHttpErrorProbability(seg.get("http_error_probability"));
-    }
-    return parseHttpErrorProbability(msg.get("http_error_probability"));
-  }
-
   private static void cpuSpin(double sec) {
     if (sec <= 0) {
       return;
@@ -612,35 +578,6 @@ public final class Main {
         ex.sendResponseHeaders(400, -1);
         return;
       }
-      double httpErrorProbability;
-      try {
-        httpErrorProbability = effectiveHttpErrorProbability(msg, seg);
-      } catch (IllegalArgumentException e) {
-        byte[] err = e.getMessage().getBytes(StandardCharsets.UTF_8);
-        ex.getResponseHeaders().set("Content-Type", "text/plain; charset=utf-8");
-        ex.sendResponseHeaders(400, err.length);
-        try (OutputStream os = ex.getResponseBody()) {
-          os.write(err);
-        }
-        return;
-      }
-      if (httpErrorProbability > 0.0
-          && ThreadLocalRandom.current().nextDouble() < httpErrorProbability) {
-        hop.setAttribute("demo.simulated_http_error", true);
-        hop.setAttribute("demo.http_error_probability", httpErrorProbability);
-        hop.setStatus(StatusCode.ERROR, "simulated_http_error");
-        JsonObject err = new JsonObject();
-        err.addProperty("error", "simulated_http_error");
-        err.addProperty("worker_id", workerId);
-        err.addProperty("probability", httpErrorProbability);
-        byte[] body = GSON.toJson(err).getBytes(StandardCharsets.UTF_8);
-        ex.getResponseHeaders().set("Content-Type", "application/json");
-        ex.sendResponseHeaders(500, body.length);
-        try (OutputStream os = ex.getResponseBody()) {
-          os.write(body);
-        }
-        return;
-      }
       if (seg.has("processing_time")) {
         ex.sendResponseHeaders(400, -1);
         return;
@@ -689,7 +626,7 @@ public final class Main {
               if (nurl == null) {
                 throw new IllegalStateException("no peer URL for nested id " + firstId);
               }
-              JsonObject nestBody = nestedPayload(nr, msg.get("http_error_probability"));
+              JsonObject nestBody = nestedPayload(nr);
               byte[] nb = GSON.toJson(nestBody).getBytes(StandardCharsets.UTF_8);
               System.out.println("[" + workerId + "] nested_forward to " + nurl + ": " + new String(nb, StandardCharsets.UTF_8));
               Span nf =
@@ -782,7 +719,7 @@ public final class Main {
       }
     }
 
-    private JsonObject nestedPayload(JsonArray nestedRoute, JsonElement rootHttpErrorProbability) {
+    private JsonObject nestedPayload(JsonArray nestedRoute) {
       JsonArray nr = new JsonArray();
       for (JsonElement e : nestedRoute) {
         JsonObject s = e.getAsJsonObject().deepCopy();
@@ -794,11 +731,6 @@ public final class Main {
       o.add("visit_log", new JsonArray());
       o.addProperty("counter", "0");
       o.add("table_of_workers", new JsonArray());
-      if (rootHttpErrorProbability == null || rootHttpErrorProbability.isJsonNull()) {
-        o.addProperty("http_error_probability", 0.0);
-      } else {
-        o.add("http_error_probability", rootHttpErrorProbability.deepCopy());
-      }
       return o;
     }
   }

@@ -320,58 +320,6 @@ public static class Program
         return true;
     }
 
-    private static bool TryParseHttpErrorProbability(JsonNode? node, out double probability, out string? err)
-    {
-        probability = 0.0;
-        err = null;
-        if (node is null)
-            return true;
-        if (node.ToJsonString() == "null")
-            return true;
-        if (node is JsonValue value)
-        {
-            if (value.TryGetValue<double>(out var number))
-            {
-                probability = number;
-            }
-            else if (value.TryGetValue<string>(out var text))
-            {
-                text = text.Trim();
-                if (text.Length == 0)
-                    return true;
-                if (!double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out probability))
-                {
-                    err = "http_error_probability must be a number between 0.0 and 1.0";
-                    return false;
-                }
-            }
-            else
-            {
-                err = "http_error_probability must be a number between 0.0 and 1.0";
-                return false;
-            }
-            if (probability is < 0.0 or > 1.0)
-            {
-                err = "http_error_probability must be between 0.0 and 1.0";
-                return false;
-            }
-            return true;
-        }
-        err = "http_error_probability must be a number between 0.0 and 1.0";
-        return false;
-    }
-
-    private static bool TryEffectiveHttpErrorProbability(
-        JsonObject root,
-        JsonObject seg,
-        out double probability,
-        out string? err)
-    {
-        if (seg.ContainsKey("http_error_probability"))
-            return TryParseHttpErrorProbability(seg["http_error_probability"], out probability, out err);
-        return TryParseHttpErrorProbability(root["http_error_probability"], out probability, out err);
-    }
-
     private static string ActivityNameFromActivity(string act)
     {
         if (string.IsNullOrWhiteSpace(act))
@@ -431,19 +379,15 @@ public static class Program
         return o;
     }
 
-    private static JsonObject BuildNestedPipelineRoot(JsonArray nestedRouteFresh, JsonNode? rootHttpErrorProbability)
+    private static JsonObject BuildNestedPipelineRoot(JsonArray nestedRouteFresh)
     {
-        var root = new JsonObject
+        return new JsonObject
         {
             ["route"] = nestedRouteFresh,
             ["visit_log"] = new JsonArray(),
             ["counter"] = "0",
             ["table_of_workers"] = new JsonArray(),
         };
-        root["http_error_probability"] = rootHttpErrorProbability is null
-            ? 0.0
-            : JsonNode.Parse(rootHttpErrorProbability.ToJsonString());
-        return root;
     }
 
     /// <summary>
@@ -743,23 +687,6 @@ public static class Program
                 $"first unvisited route segment id must match this node (expected {cid}, got {segId})");
         }
 
-        if (!TryEffectiveHttpErrorProbability(root, seg, out var httpErrorProbability, out var httpErr))
-            return Results.BadRequest(httpErr);
-        if (httpErrorProbability > 0.0 && Random.Shared.NextDouble() < httpErrorProbability)
-        {
-            hopAct?.SetTag("demo.simulated_http_error", true);
-            hopAct?.SetTag("demo.http_error_probability", httpErrorProbability);
-            hopAct?.SetStatus(ActivityStatusCode.Error, "simulated_http_error");
-            return Results.Json(
-                new
-                {
-                    error = "simulated_http_error",
-                    worker_id = cid,
-                    probability = httpErrorProbability,
-                },
-                statusCode: 500);
-        }
-
         var topSchema = RouteSegmentSchemaError(seg, "route segment");
         if (topSchema is not null)
             return Results.BadRequest(topSchema);
@@ -813,7 +740,7 @@ public static class Program
                     if (nested is not null)
                     {
                         var clone = CloneRouteWithVisitedFalse(nested);
-                        var rootNest = BuildNestedPipelineRoot(clone, root["http_error_probability"]);
+                        var rootNest = BuildNestedPipelineRoot(clone);
                         var firstSeg = nested[0]?.AsObject();
                         var firstId = firstSeg?["id"]?.GetValue<string>()?.Trim();
                         if (string.IsNullOrWhiteSpace(firstId))
